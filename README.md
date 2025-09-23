@@ -32,21 +32,25 @@ This pipeline collects **all possible metadata** for SRA samples by integrating 
 
 ### Prerequisites
 
-1. **NCBI EDirect Tools**: Install and configure
-   ```bash
-   # Install EDirect
-   sh -c "$(curl -fsSL https://ftp.ncbi.nlm.nih.gov/entrez/entrezdirect/install-edirect.sh)"
-   
-   # Configure API key (optional but recommended)
-   export NCBI_API_KEY="your_api_key_here"
-   ```
+**Quick Setup (Recommended):**
+```bash
+# Create conda environment
+conda create -n sra-metadata python=3.9 -y
+conda activate sra-metadata
 
-2. **Python Environment**: Python 3.7+ with required packages
-   ```bash
-   pip install pandas numpy requests
-   ```
+# Install all dependencies
+conda install -c bioconda entrez-direct pandas numpy requests curl jq -y
+pip install ffq
+```
 
-3. **System Tools**: `curl`, `jq`, `awk`, `sort`, `uniq`
+**Manual Setup:**
+See [INSTALL.md](INSTALL.md) for detailed installation instructions.
+
+**Required Tools:**
+- NCBI EDirect tools (`esearch`, `efetch`)
+- Python 3.7+ with `pandas`, `numpy`, `requests`
+- System tools: `curl`, `jq`
+- Optional: `ffq` for additional metadata
 
 ### Usage
 
