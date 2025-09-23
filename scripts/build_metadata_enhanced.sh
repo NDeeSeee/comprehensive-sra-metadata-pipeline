@@ -157,19 +157,7 @@ if [[ ${WITH_FFQ} -eq 1 ]]; then
     echo "[7/6] Fetching ffq JSON (fixed execution) …"
     while read -r SRR; do
       [[ -z "${SRR}" ]] && continue
-      /usr/local/anaconda3-2020/bin/python3 -c "
-import subprocess
-import sys
-try:
-    result = subprocess.run(['/usr/local/anaconda3-2020/bin/python3', '-m', 'ffq', '${SRR}', '--json'], 
-                          capture_output=True, text=True, timeout=30)
-    if result.returncode == 0:
-        print(result.stdout)
-    else:
-        print('{}', file=sys.stderr)
-except:
-    print('{}', file=sys.stderr)
-" >> "${FFQ_JSONL}" || echo "[WARN] ffq failed for ${SRR}" >&2
+      ffq "${SRR}" >> "${FFQ_JSONL}" || echo "[WARN] ffq failed for ${SRR}" >&2
     done < "${SRR_LIST}"
   else
     echo "[SKIP] ffq not found; install with: pipx install ffq  (or pip install ffq)" >&2

@@ -48,7 +48,7 @@ fi
 # Test 5: Test ffq (if available)
 echo "5. Testing ffq..."
 if command -v ffq >/dev/null 2>&1; then
-    if ffq SRR3880241 --json | head -1 | grep -q "{"; then
+    if ffq SRR3880241 | head -1 | grep -q "SRR"; then
         echo "✅ ffq working"
     else
         echo "⚠️  ffq may have issues"
