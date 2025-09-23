@@ -97,7 +97,7 @@ for SAMN in ${BIOSAMPLES}; do
   fi
 done
 
-echo "[4/6] Fetching BioProject metadata …"
+echo "[4/7] Fetching BioProject metadata …"
 # Extract BioProject accessions and fetch metadata
 BIOPROJECTS=$(awk -F',' 'NR==1{for(i=1;i<=NF;i++){if($i ~ /BioProject/i) col=i}} NR>1 && col && $col != "" && $col ~ /^PRJ/{print $col}' "${RUNINFO_CSV}" | sort -u)
 for PRJ in ${BIOPROJECTS}; do
@@ -109,7 +109,7 @@ for PRJ in ${BIOPROJECTS}; do
 done
 
 if [[ ${WITH_XML} -eq 1 ]]; then
-  echo "[5/6] Fetching SRA XML format (detailed metadata) …"
+  echo "[5/7] Fetching SRA XML format (detailed metadata) …"
   while read -r SRR; do
     [[ -z "${SRR}" ]] && continue
     esearch -db sra -query "${SRR}" | efetch -format xml | python3 -c "
@@ -129,7 +129,7 @@ except:
 fi
 
 if [[ ${WITH_GEO} -eq 1 ]]; then
-  echo "[6/6] Fetching GEO metadata …"
+  echo "[6/7] Fetching GEO metadata …"
   # Extract GEO accessions from study titles and fetch metadata
   GEO_ACCESSIONS=$(awk -F'\t' 'NR==1{for(i=1;i<=NF;i++){if($i ~ /study_title/i) col=i}} NR>1 && col && $col ~ /GSE[0-9]+/{gsub(/.*GSE([0-9]+).*/, "GSE\\1", $col); print $col}' "${ENA_TSV}" | sort -u)
   # Also check RunInfo for GEO references
@@ -154,7 +154,7 @@ fi
 
 if [[ ${WITH_FFQ} -eq 1 ]]; then
   if command -v ffq >/dev/null 2>&1; then
-    echo "[7/6] Fetching ffq JSON (fixed execution) …"
+    echo "[7/7] Fetching ffq JSON (fixed execution) …"
     while read -r SRR; do
       [[ -z "${SRR}" ]] && continue
       ffq "${SRR}" >> "${FFQ_JSONL}" || echo "[WARN] ffq failed for ${SRR}" >&2
