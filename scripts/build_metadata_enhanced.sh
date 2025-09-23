@@ -63,6 +63,10 @@ BIOPROJECT_JSONL="${OUTDIR}/raw/bioproject.jsonl"
 need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing: $1" >&2; exit 1; }; }
 need esearch; need efetch; need curl; need jq; need python3
 
+# Clear proxy settings to avoid NCBI connection issues
+unset https_proxy http_proxy HTTP_PROXY HTTPS_PROXY
+export https_proxy="" http_proxy="" HTTP_PROXY="" HTTPS_PROXY=""
+
 echo "[1/6] Fetching SRA RunInfo (via EDirect) …"
 # Concatenate all SRRs' RunInfo rows into one CSV
 while read -r SRR; do
@@ -95,7 +99,7 @@ done
 
 echo "[4/6] Fetching BioProject metadata …"
 # Extract BioProject accessions and fetch metadata
-BIOPROJECTS=$(awk -F',' 'NR==1{for(i=1;i<=NF;i++){if($i ~ /BioProject/i) col=i}} NR>1 && col{print $col}' "${RUNINFO_CSV}" | sort -u)
+BIOPROJECTS=$(awk -F',' 'NR==1{for(i=1;i<=NF;i++){if($i ~ /BioProject/i) col=i}} NR>1 && col && $col != "" && $col ~ /^PRJ/{print $col}' "${RUNINFO_CSV}" | sort -u)
 for PRJ in ${BIOPROJECTS}; do
   [[ -z "${PRJ}" ]] && continue
   if [[ "${PRJ}" =~ ^PRJ ]]; then
@@ -128,6 +132,8 @@ if [[ ${WITH_GEO} -eq 1 ]]; then
   echo "[6/6] Fetching GEO metadata …"
   # Extract GEO accessions from study titles and fetch metadata
   GEO_ACCESSIONS=$(awk -F'\t' 'NR==1{for(i=1;i<=NF;i++){if($i ~ /study_title/i) col=i}} NR>1 && col && $col ~ /GSE[0-9]+/{gsub(/.*GSE([0-9]+).*/, "GSE\\1", $col); print $col}' "${ENA_TSV}" | sort -u)
+  # Also check RunInfo for GEO references
+  GEO_ACCESSIONS="$GEO_ACCESSIONS $(awk -F',' 'NR==1{for(i=1;i<=NF;i++){if($i ~ /Study_Pubmed_id/i) col=i}} NR>1 && col && $col ~ /GSE[0-9]+/{gsub(/.*GSE([0-9]+).*/, "GSE\\1", $col); print $col}' "${RUNINFO_CSV}" | sort -u)"
   for GSE in ${GEO_ACCESSIONS}; do
     [[ -z "${GSE}" ]] && continue
     if [[ "${GSE}" =~ ^GSE ]]; then
@@ -169,6 +175,7 @@ except:
     echo "[SKIP] ffq not found; install with: pipx install ffq  (or pip install ffq)" >&2
   fi
 fi
+
 
 echo "Enhanced raw metadata saved under: ${OUTDIR}/raw"
 echo "Next: python merge_metadata_enhanced.py -i ${OUTDIR}/raw -o ${OUTDIR}/ultimate_metadata.tsv"

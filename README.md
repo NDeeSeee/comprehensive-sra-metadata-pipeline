@@ -57,16 +57,50 @@ This pipeline collects **all possible metadata** for SRA samples by integrating 
    SRR1234569
    ```
 
-2. **Run comprehensive metadata collection**:
+2. **Install prerequisites** (if not already installed):
+   ```bash
+   # Install NCBI EDirect tools
+   sh -c "$(curl -fsSL https://ftp.ncbi.nlm.nih.gov/entrez/entrezdirect/install-edirect.sh)"
+   
+   # Install ffq (optional but recommended)
+   pip install ffq
+   
+   # Install Python dependencies
+   pip install pandas numpy requests
+   ```
+
+3. **Run comprehensive metadata collection**:
    ```bash
    cd scripts
    ./build_metadata_enhanced.sh -i ../data/srr_list.txt -o ../output/comprehensive_metadata --with-geo --with-xml --with-ffq
    ```
 
-3. **Process and merge metadata**:
+4. **Process and merge metadata**:
    ```bash
-   python3 merge_metadata_enhanced.py ../output/comprehensive_metadata
+   python3 merge_metadata_enhanced.py -i ../output/comprehensive_metadata/raw -o ../output/comprehensive_metadata/ultimate_metadata.tsv
    ```
+
+### Complete Example
+
+```bash
+# Clone the repository
+git clone https://github.com/NDeeSeee/comprehensive-sra-metadata-pipeline.git
+cd comprehensive-sra-metadata-pipeline
+
+# Prepare your SRR list
+echo "SRR1234567" > data/srr_list.txt
+echo "SRR1234568" >> data/srr_list.txt
+
+# Run the complete pipeline
+cd scripts
+./build_metadata_enhanced.sh -i ../data/srr_list.txt -o ../output/final_results --with-geo --with-xml --with-ffq
+
+# Merge the results
+python3 merge_metadata_enhanced.py -i ../output/final_results/raw -o ../output/final_results/ultimate_metadata.tsv
+
+# Your comprehensive metadata is now in:
+# output/final_results/ultimate_metadata.tsv
+```
 
 ## 📊 Output
 
@@ -173,12 +207,44 @@ The script automatically handles:
 3. **Permission errors**: Ensure scripts have execute permissions
 4. **Memory issues**: Process smaller batches for large datasets
 
+### Proxy Issues
+
+If you encounter proxy-related errors with NCBI EDirect tools:
+
+```bash
+# Clear all proxy settings
+unset https_proxy http_proxy HTTP_PROXY HTTPS_PROXY
+export https_proxy="" http_proxy="" HTTP_PROXY="" HTTPS_PROXY=""
+
+# Check if proxy is still set
+env | grep -i proxy
+
+# If proxy persists, check these locations:
+cat ~/.bashrc | grep -i proxy
+conda config --show proxy_servers
+```
+
 ### Debug Mode
 
 Enable verbose logging:
 ```bash
 export DEBUG=1
 ./build_metadata_enhanced.sh -i srr_list.txt -o output
+```
+
+### Testing Individual Components
+
+Test each component separately:
+
+```bash
+# Test EDirect
+esearch -db sra -query "SRR1234567" | efetch -format runinfo
+
+# Test ENA API
+curl -s "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=SRR1234567&result=read_run&fields=run_accession&format=tsv"
+
+# Test ffq
+ffq SRR1234567 --json
 ```
 
 ## 📚 References
