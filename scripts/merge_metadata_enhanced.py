@@ -197,27 +197,47 @@ def main():
 
     print("Loading data sources...")
     
-    # Load all data sources
-    runinfo = load_runinfo(indir / "runinfo.csv")
-    ena = load_ena(indir / "ena_read_run.tsv")
-    bios = parse_biosample_jsonl(indir / "biosample.jsonl")
-    bioproj = parse_bioproject_jsonl(indir / "bioproject.jsonl")
-    sra_xml = parse_sra_xml_jsonl(indir / "sra_xml.jsonl")
-    geo = parse_geo_tsv(indir / "geo_metadata.tsv")
-    ffq = parse_ffq_jsonl(indir / "ffq.jsonl")
+    # Load all data sources with proper file existence checks
+    runinfo = load_runinfo(indir / "runinfo.csv") if (indir / "runinfo.csv").exists() else pd.DataFrame()
+    ena = load_ena(indir / "ena_read_run.tsv") if (indir / "ena_read_run.tsv").exists() else pd.DataFrame()
+    
+    # Check for both possible filenames (original and extracted)
+    biosample_file = indir / "biosample_extracted.jsonl" if (indir / "biosample_extracted.jsonl").exists() else indir / "biosample.jsonl"
+    bios = parse_biosample_jsonl(biosample_file) if biosample_file.exists() else pd.DataFrame()
+    
+    bioproject_file = indir / "bioproject_extracted.jsonl" if (indir / "bioproject_extracted.jsonl").exists() else indir / "bioproject.jsonl"
+    bioproj = parse_bioproject_jsonl(bioproject_file) if bioproject_file.exists() else pd.DataFrame()
+    
+    sra_xml = parse_sra_xml_jsonl(indir / "sra_xml.jsonl") if (indir / "sra_xml.jsonl").exists() else pd.DataFrame()
+    geo = parse_geo_tsv(indir / "geo_metadata.tsv") if (indir / "geo_metadata.tsv").exists() else pd.DataFrame()
+    ffq = parse_ffq_jsonl(indir / "ffq.jsonl") if (indir / "ffq.jsonl").exists() else pd.DataFrame()
 
     print(f"Loaded: RunInfo({len(runinfo)}), ENA({len(ena)}), BioSample({len(bios)}), BioProject({len(bioproj)}), SRA-XML({len(sra_xml)}), GEO({len(geo)}), ffq({len(ffq)})")
 
-    # Start with ENA data as primary source
+    # Validate that we have at least one data source
+    if ena.empty and runinfo.empty:
+        print("ERROR: No primary data sources found (ENA and RunInfo both empty)")
+        print("Available files in directory:")
+        for f in indir.iterdir():
+            print(f"  - {f.name}")
+        return
+
+    # Start with ENA data as primary source (most comprehensive)
     if not ena.empty:
         merged = ena.copy()
+        print(f"Using ENA as primary source: {len(merged)} samples")
+    elif not runinfo.empty:
+        # If ENA is empty, start with RunInfo
+        merged = runinfo.copy()
+        merged = merged.rename(columns={'Run': 'run_accession'})
+        print(f"Using RunInfo as primary source: {len(merged)} samples")
     else:
         merged = pd.DataFrame()
     
-    # Merge with RunInfo
-    if not runinfo.empty:
+    # Merge with RunInfo (if not already used as primary)
+    if not runinfo.empty and not ena.empty:
         runinfo = runinfo.rename(columns={'Run': 'run_accession'})
-        merged = merged.merge(runinfo, on='run_accession', how='outer', suffixes=('', '_sra'))
+        merged = merged.merge(runinfo, on='run_accession', how='left', suffixes=('', '_sra'))
     
     # Merge with BioSample
     if not bios.empty and 'BioSample' in merged.columns:
@@ -231,16 +251,30 @@ def main():
     if not sra_xml.empty and 'run_accession' in sra_xml.columns:
         merged = merged.merge(sra_xml, on='run_accession', how='left', suffixes=('', '_xml'))
     
-    # Merge with GEO
-    if not geo.empty:
-        # Try to match GEO data with study information
+    # Merge with GEO (more efficient approach)
+    if not geo.empty and not merged.empty:
+        # Create a GEO lookup dictionary for efficient matching
+        geo_lookup = {}
+        for _, geo_row in geo.iterrows():
+            for col, val in geo_row.items():
+                if isinstance(val, str) and val.startswith('GSE'):
+                    geo_lookup[val] = geo_row.to_dict()
+        
+        # Add GEO columns to merged data
+        geo_cols = []
+        for col in geo.columns:
+            geo_cols.append(f'geo_{col}')
+            merged[f'geo_{col}'] = ''
+        
+        # Match GEO data efficiently
         if 'study_title' in merged.columns:
             for idx, row in merged.iterrows():
                 study_title = str(row.get('study_title', ''))
-                geo_match = geo[geo.apply(lambda x: any(gse in study_title for gse in x.values() if isinstance(gse, str) and gse.startswith('GSE')), axis=1)]
-                if not geo_match.empty:
-                    for col in geo_match.columns:
-                        merged.at[idx, f'geo_{col}'] = geo_match.iloc[0][col]
+                for gse_id, geo_data in geo_lookup.items():
+                    if gse_id in study_title:
+                        for col, val in geo_data.items():
+                            merged.at[idx, f'geo_{col}'] = val
+                        break
     
     # Merge with ffq
     if not ffq.empty and 'run_accession' in ffq.columns:
