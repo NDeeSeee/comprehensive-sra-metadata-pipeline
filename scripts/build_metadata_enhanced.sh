@@ -138,8 +138,8 @@ if [[ ${WITH_GEO} -eq 1 ]]; then
     [[ -z "${GSE}" ]] && continue
     if [[ "${GSE}" =~ ^GSE ]]; then
       curl -s "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=${GSE}&targ=all&view=data&form=text" | \
-        /usr/local/anaconda3-2020/bin/python3 -c "
-import sys, re
+        python3 -c "
+import sys, json, re
 geo_data = {}
 for line in sys.stdin:
     if line.startswith('!') and '=' in line:
