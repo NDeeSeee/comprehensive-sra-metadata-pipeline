@@ -67,7 +67,7 @@ need esearch; need efetch; need curl; need jq; need python3
 unset https_proxy http_proxy HTTP_PROXY HTTPS_PROXY
 export https_proxy="" http_proxy="" HTTP_PROXY="" HTTPS_PROXY=""
 
-echo "[1/6] Fetching SRA RunInfo (via EDirect) …"
+echo "[1/7] Fetching SRA RunInfo (via EDirect) …"
 # Concatenate all SRRs' RunInfo rows into one CSV
 while read -r SRR; do
   [[ -z "${SRR}" ]] && continue
@@ -75,7 +75,7 @@ while read -r SRR; do
     echo "[WARN] RunInfo failed for ${SRR}" >&2
 done < "${SRR_LIST}"
 
-echo "[2/6] Fetching enhanced ENA filereport (read_run) …"
+echo "[2/7] Fetching enhanced ENA filereport (read_run) …"
 # Enhanced ENA fields - comprehensive metadata including sample, environmental, and experimental details
 ENA_FIELDS="run_accession,experiment_accession,sample_accession,study_accession,secondary_sample_accession,secondary_study_accession,broker_name,center_name,experiment_title,library_name,library_layout,library_selection,library_strategy,library_source,instrument_model,read_count,base_count,first_public,last_updated,scientific_name,collection_date,study_title,sample_title,submitted_ftp,fastq_ftp,age,altitude,cell_line,cell_type,dev_stage,disease,environment_biome,environment_feature,environment_material,environmental_medium,environmental_sample,host,host_body_site,host_genotype,host_phenotype,isolate,location,sex,strain,temperature,tissue_type"
 
@@ -85,7 +85,7 @@ while read -r SRR; do
     >> "${ENA_TSV}" || echo "[WARN] ENA filereport failed for ${SRR}" >&2
 done < "${SRR_LIST}"
 
-echo "[3/6] Fetching enhanced BioSample JSON (for SAMN from RunInfo) …"
+echo "[3/7] Fetching enhanced BioSample JSON (for SAMN from RunInfo) …"
 # Enhanced BioSample extraction with better error handling
 BIOSAMPLES=$(awk -F',' 'NR==1{for(i=1;i<=NF;i++){if($i ~ /BioSample/i) col=i}} NR>1 && col{print $col}' "${RUNINFO_CSV}" | sort -u)
 for SAMN in ${BIOSAMPLES}; do
