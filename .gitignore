@@ -57,6 +57,7 @@ output/*/logs/*.log
 # Jupyter
 .ipynb_checkpoints/
 
-# Test files
+# Test files (but allow test scripts)
 test_*
 *_test.*
+!scripts/test_pipeline.sh
