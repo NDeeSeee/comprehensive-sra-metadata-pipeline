@@ -87,7 +87,7 @@ def classify_cancer_type(row):
     # Check for bulk sorted/purified populations
     if any(keyword in all_text for keyword in [
         'sorted', 'purified', 'isolated', 'enriched', 'facs', 'magnetic',
-        'cd4', 'cd8', 't cell', 'b cell', 'monocyte', 'macrophage'
+        'cd4', 'cd8', 't cell', 'b cell', 'monocyte', 'macrophage', 'fibroblast', 'CAFS'
     ]):
         is_bulk_sorted = "yes"
     

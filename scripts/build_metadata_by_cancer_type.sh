@@ -52,9 +52,9 @@ echo "[1/8] Searching for cancer type: ${CANCER_TYPE}"
 SRR_LIST="${OUTDIR}/cancer_type_srr_list.txt"
 
 if [[ ${TEST_MODE} -eq 1 ]]; then
-  /usr/bin/python3 scripts/demo_cancer_search.py -c "${CANCER_TYPE}" -o "${SRR_LIST}" --test
+  /usr/bin/python3 scripts/real_cancer_search.py -c "${CANCER_TYPE}" -o "${SRR_LIST}" --test
 else
-  /usr/bin/python3 scripts/demo_cancer_search.py -c "${CANCER_TYPE}" -o "${SRR_LIST}" --max-results "${MAX_RESULTS}"
+  /usr/bin/python3 scripts/real_cancer_search.py -c "${CANCER_TYPE}" -o "${SRR_LIST}" --max-results "${MAX_RESULTS}"
 fi
 
 if [[ ! -f "${SRR_LIST}" || ! -s "${SRR_LIST}" ]]; then
