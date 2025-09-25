@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Cancer Classification Script
-Classifies samples into: Cell line, Tumor, Pre-malignant, Normal, Unknown
-Based on metadata fields for downstream analysis filtering
+Enhanced Cancer Classification Script
+Works with comprehensive metadata (92+ columns) for better classification accuracy
 """
 
 import pandas as pd
@@ -12,7 +11,7 @@ import pathlib
 
 def classify_cancer_type(row):
     """
-    Classify sample based on metadata using decision tree logic
+    Enhanced classification using comprehensive metadata fields
     """
     # Initialize classification
     top_label = "Unknown"
@@ -23,37 +22,49 @@ def classify_cancer_type(row):
     barrett_grade = "unknown"
     tissue_origin = ""
     
-    # Get relevant fields (case-insensitive)
-    cell_line = str(row.get('cell_line', '')).lower()
-    disease = str(row.get('disease', '')).lower()
-    tissue_type = str(row.get('tissue_type', '')).lower()
-    sample_title = str(row.get('sample_title', '')).lower()
-    study_title = str(row.get('study_title', '')).lower()
-    experiment_title = str(row.get('experiment_title', '')).lower()
-    source_name = str(row.get('source_name', '')).lower()
-    cell_type = str(row.get('cell_type', '')).lower()
-    disease_state = str(row.get('disease_state', '')).lower()
-    histological_type = str(row.get('histological_type', '')).lower()
-    treatment = str(row.get('treatment', '')).lower()
-    genotype = str(row.get('genotype', '')).lower()
-    phenotype = str(row.get('phenotype', '')).lower()
+    # Get all relevant fields (case-insensitive)
+    fields_to_check = [
+        'cell_line', 'disease', 'tissue_type', 'sample_title', 'study_title', 
+        'experiment_title', 'source_name', 'cell_type', 'disease_state', 
+        'histological_type', 'treatment', 'genotype', 'phenotype',
+        'SampleName', 'Histological_Type', 'Body_Site', 'Tumor', 'Analyte_Type', 
+        'Disease', 'experiment_title', 'study_title', 'sample_title',
+        'age', 'altitude', 'environment_biome', 'host', 'host_body_site',
+        'isolate', 'location', 'sex', 'strain', 'temperature', 'dev_stage',
+        'environment_feature', 'environment_material', 'environmental_medium',
+        'environmental_sample', 'host_genotype', 'host_phenotype',
+        'biomaterial_provider', 'organism_part', 'sampling_site', 'analyte_type',
+        'body_site', 'disease_staging', 'is_tumor', 'subject_is_affected',
+        'individual', 'replicate', 'experimental_factor'
+    ]
     
     # Combine all text fields for analysis
-    all_text = f"{cell_line} {disease} {tissue_type} {sample_title} {study_title} {experiment_title} {source_name} {cell_type} {disease_state} {histological_type} {treatment} {genotype} {phenotype}"
+    all_text_parts = []
+    for field in fields_to_check:
+        value = str(row.get(field, '')).lower()
+        if value and value != 'nan':
+            all_text_parts.append(value)
+    
+    all_text = ' '.join(all_text_parts)
     
     # Decision Tree Logic
     
+    # 0. Check explicit tumor flags first
+    tumor_flags = ['yes', 'true', '1']
+    if str(row.get('Tumor', '')).lower() in tumor_flags or str(row.get('is_tumor', '')).lower() in tumor_flags:
+        top_label = "Tumor"
+    
     # 1. Check for Cell Line
-    cell_line_keywords = ['cell line', 'culture', 'passaged', 'cellline', 'cl', 'line']
-    if any(keyword in all_text for keyword in cell_line_keywords):
+    elif any(keyword in all_text for keyword in ['cell line', 'culture', 'passaged', 'cellline', 'cl', 'line']):
         top_label = "Cell line"
         is_cell_line = "yes"
     
-    # 2. If not cell line, check for cancer/tumor
+    # 2. Check for cancer/tumor keywords
     elif any(keyword in all_text for keyword in [
         'carcinoma', 'cancer', 'tumor', 'tumour', 'malignant', 'adenocarcinoma',
         'squamous cell carcinoma', 'scc', 'invasive', 'metastatic', 'neoplasm',
-        'esophageal adenocarcinoma', 'eac', 'esophageal cancer'
+        'esophageal adenocarcinoma', 'eac', 'esophageal cancer', 'eac1416',
+        'sarcoma', 'lymphoma', 'leukemia', 'melanoma', 'glioblastoma'
     ]):
         top_label = "Tumor"
     
@@ -101,14 +112,21 @@ def classify_cancer_type(row):
             top_label = "Normal"
     
     # Determine tissue origin
-    if 'esophagus' in all_text or 'esophageal' in all_text:
+    tissue_text = f"{all_text} {str(row.get('Body_Site', '')).lower()}"
+    if 'esophagus' in tissue_text or 'esophageal' in tissue_text:
         tissue_origin = "esophagus"
-    elif 'stomach' in all_text or 'gastric' in all_text:
+    elif 'stomach' in tissue_text or 'gastric' in tissue_text:
         tissue_origin = "stomach"
-    elif 'intestine' in all_text or 'intestinal' in all_text:
+    elif 'intestine' in tissue_text or 'intestinal' in tissue_text:
         tissue_origin = "intestine"
-    elif 'lung' in all_text or 'pulmonary' in all_text:
+    elif 'lung' in tissue_text or 'pulmonary' in tissue_text:
         tissue_origin = "lung"
+    elif 'liver' in tissue_text or 'hepatic' in tissue_text:
+        tissue_origin = "liver"
+    elif 'breast' in tissue_text or 'mammary' in tissue_text:
+        tissue_origin = "breast"
+    elif 'brain' in tissue_text or 'cerebral' in tissue_text:
+        tissue_origin = "brain"
     else:
         tissue_origin = "unknown"
     
@@ -123,18 +141,18 @@ def classify_cancer_type(row):
     }
 
 def main():
-    parser = argparse.ArgumentParser(description='Classify samples for cancer analysis')
-    parser.add_argument('-i', '--input', required=True, help='Input TSV file with metadata')
+    parser = argparse.ArgumentParser(description='Enhanced cancer classification for comprehensive metadata')
+    parser.add_argument('-i', '--input', required=True, help='Input TSV file with comprehensive metadata')
     parser.add_argument('-o', '--output', required=True, help='Output TSV file with classifications')
     args = parser.parse_args()
     
     # Load metadata
-    print(f"Loading metadata from: {args.input}")
+    print(f"Loading comprehensive metadata from: {args.input}")
     df = pd.read_csv(args.input, sep='\t', low_memory=False)
-    print(f"Loaded {len(df)} samples")
+    print(f"Loaded {len(df)} samples with {len(df.columns)} columns")
     
     # Apply classification
-    print("Applying cancer classification...")
+    print("Applying enhanced cancer classification...")
     classifications = []
     
     for idx, row in df.iterrows():
@@ -162,8 +180,9 @@ def main():
     result_df.to_csv(args.output, sep='\t', index=False)
     
     # Print summary
-    print(f"\nClassification Summary:")
+    print(f"\nEnhanced Classification Summary:")
     print(f"Total samples: {len(result_df)}")
+    print(f"Total columns: {len(result_df.columns)}")
     print(f"\nTop Label Distribution:")
     print(result_df['top_label'].value_counts())
     print(f"\nCell Line Samples: {len(result_df[result_df['is_cell_line'] == 'yes'])}")

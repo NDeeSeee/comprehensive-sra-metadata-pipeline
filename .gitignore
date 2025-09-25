@@ -60,4 +60,5 @@ output/*/logs/*.log
 # Test files (but allow test scripts)
 test_*
 *_test.*
-!scripts/test_pipeline.sh
+!scripts/test_pipeline.sh.DS_Store
+venv/
