@@ -30,8 +30,36 @@ class CancerAnalysisPipeline:
         self.output_dir = Path(output_dir)
         self.cancer_type_dir = self.output_dir / cancer_type.replace(" ", "_").replace("/", "_")
         
+        # Validate required scripts exist
+        self.validate_scripts()
+        
         # Create directory structure
         self.create_directory_structure()
+    
+    def validate_scripts(self):
+        """Validate that all required scripts exist and are executable"""
+        required_scripts = [
+            "scripts/cancer_type_search.py",
+            "scripts/comprehensive_metadata_pipeline.sh", 
+            "scripts/cancer_classification.py",
+            "scripts/download_fastq_by_category.py"
+        ]
+        
+        for script in required_scripts:
+            script_path = Path(script)
+            if not script_path.exists():
+                raise FileNotFoundError(f"Required script not found: {script}")
+            if not script_path.is_file():
+                raise FileNotFoundError(f"Script is not a file: {script}")
+        
+        # Check for SRA toolkit
+        try:
+            subprocess.run(["prefetch", "--version"], capture_output=True, check=True)
+            subprocess.run(["fastq-dump", "--version"], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            logger.warning("SRA toolkit not found. FASTQ downloads will fail.")
+        
+        logger.info("All required scripts validated successfully")
         
     def create_directory_structure(self):
         """Create organized directory structure for the analysis"""
@@ -86,8 +114,8 @@ class CancerAnalysisPipeline:
         # Run comprehensive metadata collection
         metadata_cmd = [
             "bash", "scripts/comprehensive_metadata_pipeline.sh",
-            str(srr_list_file),
-            str(metadata_file)
+            "-i", str(srr_list_file),
+            "-o", str(self.cancer_type_dir / "metadata")
         ]
         
         logger.info(f"Running: {' '.join(metadata_cmd)}")
