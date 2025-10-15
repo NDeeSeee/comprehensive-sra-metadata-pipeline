@@ -42,14 +42,27 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Large data files (keep structure but not large outputs)
-output/*/raw/*.jsonl
-output/*/raw/*.tsv
-output/*/raw/*.csv
-output/*/logs/*.log
+# Large data & generated outputs (keep structure but not large outputs)
+output/**/raw/*.jsonl
+output/**/raw/*.tsv
+output/**/raw/*.csv
+output/**/logs/*.log
+output/**/download_summary.txt
+output/**/pipeline_summary.txt
+
+# Cancer analysis pipeline outputs
+cancer_analysis_output/**/fastq_downloads/**
+cancer_analysis_output/**/logs/**
+cancer_analysis_output/**/metadata/raw/*.jsonl
+cancer_analysis_output/**/metadata/raw/*.tsv
+cancer_analysis_output/**/metadata/raw/*.csv
+cancer_analysis_output/**/pipeline_summary.txt
+!cancer_analysis_output/**/classification/classified_metadata*.tsv
+!cancer_analysis_output/**/metadata/comprehensive_metadata*.tsv
 
 # Keep final processed outputs
-!output/*/ultimate_metadata*.tsv
+!output/**/ultimate_metadata*.tsv
+!output/**/classified_metadata*.tsv
 
 # Conda
 .conda/
@@ -57,8 +70,13 @@ output/*/logs/*.log
 # Jupyter
 .ipynb_checkpoints/
 
-# Test files (but allow test scripts)
-test_*
-*_test.*
-!scripts/test_pipeline.sh.DS_Store
+# Example/demo artifacts
+examples/**
+
+# Local logs
+*.log
+fastq_download.log
+cancer_analysis_pipeline.log
+
+# Virtual environments (duplicated at bottom previously)
 venv/
