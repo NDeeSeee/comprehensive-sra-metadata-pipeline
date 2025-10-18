@@ -47,10 +47,10 @@ if [ "$INPUT" = "sample_list.txt" ] || [ "$(basename "$INPUT")" = "sample_list.t
             continue
         fi
         
-        echo "→ Converting ${SRR_ID}.sra to FASTQ..."
-        
-        # Generate LSF job for this SRR
-        cat <<EOF
+        echo "→ Submitting conversion job for ${SRR_ID}.sra"
+
+        # Submit LSF job for this SRR
+        bsub <<EOF
 #BSUB -L /bin/bash
 #BSUB -W 10:00
 #BSUB -n 1
@@ -69,6 +69,11 @@ cd $DIR
 fastq-dump --split-files ${SRR_ID}.sra --origfmt --gzip -O .
 
 EOF
+        if [ $? -eq 0 ]; then
+            echo "  ✓ Job submitted for ${SRR_ID}"
+        else
+            echo "  ✗ Job submission failed for ${SRR_ID}"
+        fi
     done
     
 else
@@ -82,7 +87,7 @@ else
         exit 0
     fi
     
-    cat <<EOF
+    bsub <<EOF
 #BSUB -L /bin/bash
 #BSUB -W 10:00
 #BSUB -n 1
