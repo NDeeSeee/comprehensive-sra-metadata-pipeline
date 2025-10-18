@@ -54,7 +54,6 @@ if [ "$INPUT" = "sample_list.txt" ] || [ "$(basename "$INPUT")" = "sample_list.t
 #BSUB -L /bin/bash
 #BSUB -W 10:00
 #BSUB -n 1
-#BSUB -R "span[ptile=4]"
 #BSUB -M 32000
 #BSUB -e $DIR/logs/${SRR_ID}_fastqdump.err.txt
 #BSUB -o $DIR/logs/${SRR_ID}_fastqdump.out.txt
@@ -87,7 +86,6 @@ else
 #BSUB -L /bin/bash
 #BSUB -W 10:00
 #BSUB -n 1
-#BSUB -R "span[ptile=4]"
 #BSUB -M 32000
 #BSUB -e $DIR/logs/${SAMPLE}_fastqdump.err.txt
 #BSUB -o $DIR/logs/${SAMPLE}_fastqdump.out.txt
