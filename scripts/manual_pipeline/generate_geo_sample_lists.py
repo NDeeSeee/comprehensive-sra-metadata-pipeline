@@ -1,7 +1,13 @@
+#!/usr/bin/env python3
+
+# Generate GEO sample lists (previously GEO_sampleSetup_enhanced_VP.py)
+# Creates POSEIDON-compatible sample_list.txt files from Excel/CSV metadata
+
 import os
 import sys
 import argparse
 from collections import defaultdict
+from typing import List, Optional
 
 import pandas as pd
 
@@ -35,7 +41,7 @@ def infer_cancer_type_from_filename(file_path: str) -> str:
     return " ".join(filtered_tokens).strip()
 
 
-def _resolve_column_name(df: pd.DataFrame, candidates: list[str]) -> str | None:
+def _resolve_column_name(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     """Return the actual column name matching any candidate (case/space-insensitive)."""
     normalized_to_actual = {str(c).strip().lower(): c for c in df.columns}
     for candidate in candidates:

@@ -188,7 +188,7 @@ echo "Saved to: ${OUTDIR}/comprehensive_metadata.tsv"
 if [[ "${CLASSIFY}" == "true" ]]; then
   echo ""
   echo "[9/9] Applying cancer classification …"
-  python3 scripts/cancer_classification.py -i "${OUTDIR}/comprehensive_metadata.tsv" -o "${OUTDIR}/classified_metadata.tsv"
+  python3 scripts/automated_pipeline/cancer_classification.py -i "${OUTDIR}/comprehensive_metadata.tsv" -o "${OUTDIR}/classified_metadata.tsv"
   echo "Cancer classification complete: ${OUTDIR}/classified_metadata.tsv"
 fi
 

@@ -23,10 +23,14 @@ ValeriiGitRepo/
 │   │   ├── extract_zero_tcga_cancers.py
 │   │   └── merge_metadata_maximum.py
 │   ├── manual_pipeline/             # Excel-based approach
-│   │   ├── GEO_sampleSetup_enhanced_VP.py
-│   │   ├── sratoolkit.sh
-│   │   ├── fdump.sh
-│   │   └── star_2pass-paired.sh
+│   │   ├── generate_geo_sample_lists.py
+│   │   ├── prefetch_gallbladder_sra.sh
+│   │   ├── prefetch_geo_option_file.sh
+│   │   ├── prefetch_mesothelioma_dbgap.sh
+│   │   ├── run_fastq_workflow.sh
+│   │   ├── submit_fastq_dump_jobs.sh
+│   │   ├── submit_star_2pass_batch.sh
+│   │   └── submit_star_2pass_job.sh
 │   └── downstream_analysis/         # Post-alignment analysis
 ├── data/
 │   ├── automated_metadata/         # Auto-generated metadata
@@ -69,7 +73,7 @@ The manual pipeline uses **pre-curated Excel files** containing manually selecte
 
 #### 2. **Sample List Generation**
 ```bash
-python scripts/manual_pipeline/GEO_sampleSetup_enhanced_VP.py data/manual_metadata/Pancreas.xlsx
+python scripts/manual_pipeline/generate_geo_sample_lists.py data/manual_metadata/Pancreas.xlsx
 ```
 - **Output**: `sample_list.txt` files in POSEIDON directories
 - **Format**: `BioSample_ID\tFASTQ_R1\tFASTQ_R2`
@@ -77,7 +81,7 @@ python scripts/manual_pipeline/GEO_sampleSetup_enhanced_VP.py data/manual_metada
 #### 3. **SRA Download**
 ```bash
 cd POSEIDON/Tumors/Pancreas/
-./sratoolkit.sh | bsub
+./prefetch_gallbladder_sra.sh | bsub
 ```
 - **Tool**: SRA Toolkit `prefetch`
 - **Input**: `sample_list.txt` or SRA list file
@@ -85,7 +89,7 @@ cd POSEIDON/Tumors/Pancreas/
 
 #### 4. **FASTQ Conversion**
 ```bash
-for i in *.sra; do ./fdump.sh $i | bsub; done
+for i in *.sra; do ./submit_fastq_dump_jobs.sh $i | bsub; done
 ```
 - **Tool**: SRA Toolkit `fastq-dump`
 - **Input**: `.sra` files
@@ -93,7 +97,7 @@ for i in *.sra; do ./fdump.sh $i | bsub; done
 
 #### 5. **STAR Alignment**
 ```bash
-for i in *1.fastq.gz; do bash star_2pass-paired.sh $i | bsub; done
+for i in *1.fastq.gz; do bash submit_star_2pass_job.sh $i | bsub; done
 ```
 - **Tool**: STAR 2-pass alignment
 - **Reference**: GRCh38
@@ -102,29 +106,29 @@ for i in *1.fastq.gz; do bash star_2pass-paired.sh $i | bsub; done
 
 ### Manual Pipeline Scripts
 
-#### `GEO_sampleSetup_enhanced_VP.py`
+#### `generate_geo_sample_lists.py`
 - **Purpose**: Generate sample_list.txt from Excel metadata
 - **Input**: Excel file with 4 sheets
 - **Output**: sample_list.txt files in POSEIDON directories
-- **Usage**: `python GEO_sampleSetup_enhanced_VP.py metadata_file.xlsx`
+- **Usage**: `python generate_geo_sample_lists.py metadata_file.xlsx`
 
-#### `sratoolkit.sh`
+#### `prefetch_gallbladder_sra.sh`
 - **Purpose**: Download SRA files using prefetch
 - **Input**: SRA list file
 - **Output**: .sra files
-- **Usage**: `./sratoolkit.sh | bsub`
+- **Usage**: `./prefetch_gallbladder_sra.sh | bsub`
 
-#### `fdump.sh`
+#### `submit_fastq_dump_jobs.sh`
 - **Purpose**: Convert SRA to FASTQ
 - **Input**: .sra files
 - **Output**: *_1.fastq.gz, *_2.fastq.gz files
-- **Usage**: `for i in *.sra; do ./fdump.sh $i | bsub; done`
+- **Usage**: `for i in *.sra; do ./submit_fastq_dump_jobs.sh $i | bsub; done`
 
-#### `star_2pass-paired.sh`
+#### `submit_star_2pass_job.sh`
 - **Purpose**: STAR 2-pass alignment
 - **Input**: FASTQ files
 - **Output**: BAM files
-- **Usage**: `for i in *1.fastq.gz; do bash star_2pass-paired.sh $i | bsub; done`
+- **Usage**: `for i in *1.fastq.gz; do bash submit_star_2pass_job.sh $i | bsub; done`
 
 ## Automated Pipeline (Database-Driven)
 

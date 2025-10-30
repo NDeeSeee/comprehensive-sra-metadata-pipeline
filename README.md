@@ -31,7 +31,7 @@ cd POSEIDON/Tumors/Pancreas/
 ./sratoolkit.sh | bsub
 
 # 3) Convert to FASTQ
-for i in *.sra; do ./fdump.sh $i | bsub; done
+for i in *.sra; do ./submit_fastq_dump_jobs.sh $i | bsub; done
 
 # 4) STAR alignment
 for i in *1.fastq.gz; do bash star_2pass-paired.sh $i | bsub; done
@@ -77,10 +77,14 @@ ValeriiGitRepo/
 │   │   ├── extract_zero_tcga_cancers.py
 │   │   └── merge_metadata_maximum.py
 │   ├── manual_pipeline/             # Excel-based approach
-│   │   ├── GEO_sampleSetup_enhanced_VP.py
-│   │   ├── sratoolkit.sh
-│   │   ├── fdump.sh
-│   │   └── star_2pass-paired.sh
+│   │   ├── generate_geo_sample_lists.py
+│   │   ├── prefetch_gallbladder_sra.sh
+│   │   ├── prefetch_geo_option_file.sh
+│   │   ├── prefetch_mesothelioma_dbgap.sh
+│   │   ├── run_fastq_workflow.sh
+│   │   ├── submit_fastq_dump_jobs.sh
+│   │   ├── submit_star_2pass_batch.sh
+│   │   └── submit_star_2pass_job.sh
 │   └── downstream_analysis/         # Post-alignment analysis
 ├── data/
 │   ├── automated_metadata/         # Auto-generated metadata
@@ -110,10 +114,14 @@ ValeriiGitRepo/
 ## Scripts
 
 ### Manual Pipeline
-- `scripts/manual_pipeline/GEO_sampleSetup_enhanced_VP.py` – Generate sample lists from Excel
-- `scripts/manual_pipeline/sratoolkit.sh` – Download SRA files
-- `scripts/manual_pipeline/fdump.sh` – Convert SRA to FASTQ
-- `scripts/manual_pipeline/star_2pass-paired.sh` – STAR 2-pass alignment
+- `scripts/manual_pipeline/generate_geo_sample_lists.py` – Generate sample lists from Excel metadata
+- `scripts/manual_pipeline/prefetch_gallbladder_sra.sh` – Download Gallbladder study SRA files
+- `scripts/manual_pipeline/prefetch_geo_option_file.sh` – Prefetch SRA accessions from GEO option file
+- `scripts/manual_pipeline/prefetch_mesothelioma_dbgap.sh` – Prefetch Mesothelioma dbGaP accessions
+- `scripts/manual_pipeline/run_fastq_workflow.sh` – End-to-end manual FASTQ workflow
+- `scripts/manual_pipeline/submit_fastq_dump_jobs.sh` – Convert SRA to FASTQ
+- `scripts/manual_pipeline/submit_star_2pass_batch.sh` – Batch-submit STAR 2-pass jobs
+- `scripts/manual_pipeline/submit_star_2pass_job.sh` – Submit a single STAR 2-pass job
 
 ### Automated Pipeline
 - `scripts/automated_pipeline/cancer_analysis_pipeline.py` – Orchestrates end-to-end workflow

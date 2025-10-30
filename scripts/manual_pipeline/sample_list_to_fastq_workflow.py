@@ -66,6 +66,16 @@ class SRAWorkflow:
                     }
         
         logger.info(f"Found {len(self.samples)} samples")
+
+    def _sample_has_bam(self, sample_id: str) -> bool:
+        """Return True if a BAM for this sample exists (sample_id*.bam)."""
+        try:
+            for p in self.cancer_dir.glob(f"{sample_id}*.bam"):
+                if p.is_file() and p.stat().st_size > 0:
+                    return True
+        except Exception:
+            pass
+        return False
         
     def _extract_srr_ids(self, col2, col3):
         """Extract unique SRR/ERR IDs from the two columns"""
@@ -96,15 +106,6 @@ class SRAWorkflow:
         logger.info("=" * 50)
         
         for sample_id, sample_data in self.samples.items():
-            # Check if sample-level FASTQs already exist
-            sample_r1 = self.cancer_dir / f"{sample_id}_1.fastq.gz"
-            sample_r2 = self.cancer_dir / f"{sample_id}_2.fastq.gz"
-            
-            if sample_r1.exists() and sample_r2.exists():
-                logger.info(f"  ✓ Sample {sample_id} FASTQs exist, skipping downloads")
-                sample_data['status'] = 'DONE'
-                continue
-            
             # Download each SRR file for this sample
             for srr_id in sample_data['srr_ids']:
                 self._download_single_sra(srr_id, sample_id)
@@ -172,14 +173,11 @@ class SRAWorkflow:
         logger.info("STEP 2: Convert SRA to FASTQ")
         logger.info("=" * 50)
         
-        # Path to the conversion script (fdump.sh)
-        fdump_script = Path("/data/salomonis-archive/FASTQs/NCI-R01/POSEIDON/ValeriiGitRepo/scripts/manual_pipeline/fdump.sh")
+        # Path to the conversion script (submit_fastq_dump_jobs.sh)
+        fdump_script = Path("/data/salomonis-archive/FASTQs/NCI-R01/POSEIDON/ValeriiGitRepo/scripts/manual_pipeline/submit_fastq_dump_jobs.sh")
         
         jobs_to_wait = {}
         for sample_id, sample_data in self.samples.items():
-            # Skip if sample already complete
-            if sample_data['status'] == 'DONE':
-                continue
             
             for srr_id in sample_data['srr_ids']:
                 sra_file = self.cancer_dir / f"{srr_id}.sra"
@@ -197,7 +195,7 @@ class SRAWorkflow:
                 if sra_file.exists():
                     logger.info(f"→ Submitting conversion job for {srr_id}.sra")
                     try:
-                        # Capture bsub output from fdump.sh to parse Job ID
+                        # Capture bsub output from submit_fastq_I_jobs.sh to parse Job ID
                         proc = subprocess.run(
                             ['bash', str(fdump_script), str(sra_file)],
                             cwd=self.cancer_dir,
@@ -218,6 +216,13 @@ class SRAWorkflow:
         # Optionally wait for jobs to finish and then clean up SRAs
         if not self.no_wait and jobs_to_wait:
             self._wait_for_jobs_and_cleanup(jobs_to_wait)
+        # Global SRA cleanup pass: remove any .sra with verified FASTQs
+        self.cleanup_converted_sras_global()
+        # Refresh status after conversion stage
+        try:
+            self.generate_status_report()
+        except Exception as e:
+            logger.warning(f"Failed to update status report: {e}")
 
     def _parse_bsub_job_id(self, text: str):
         match = re.search(r"Job\s*<(\d+)>", text or "")
@@ -236,6 +241,10 @@ class SRAWorkflow:
             return out if out else 'UNKNOWN'
         except Exception:
             return 'UNKNOWN'
+
+    def _is_job_active(self, job_id: str) -> bool:
+        status = self._bjobs_status(job_id)
+        return status in ('PEND', 'RUN', 'PSUSP', 'USUSP', 'SSUSP')
 
     def _gzip_test(self, *paths: Path) -> bool:
         try:
@@ -281,91 +290,16 @@ class SRAWorkflow:
             # Remove finished from remaining
             for s in finished:
                 remaining.pop(s, None)
+            # Periodic status refresh each poll cycle
+            try:
+                self.generate_status_report()
+            except Exception:
+                pass
             if remaining:
                 time.sleep(self.poll_interval_sec)
         logger.info("All submitted conversion jobs processed.")
     
-    def merge_fastq_files(self):
-        """Step 3: Merge SRR-level FASTQs into sample-level FASTQs"""
-        logger.info("=" * 50)
-        logger.info("STEP 3: Merge SRR FASTQs into sample-level FASTQs")
-        logger.info("=" * 50)
-        
-        for sample_id, sample_data in self.samples.items():
-            sample_r1 = self.cancer_dir / f"{sample_id}_1.fastq.gz"
-            sample_r2 = self.cancer_dir / f"{sample_id}_2.fastq.gz"
-            
-            # Skip if already exists and valid
-            if sample_r1.exists() and sample_r2.exists():
-                if self._gzip_test(sample_r1, sample_r2):
-                    continue
-                else:
-                    logger.warning(f"    ! Found corrupt/incomplete sample FASTQs for {sample_id}; removing to re-merge")
-                    with contextlib.suppress(Exception):
-                        sample_r1.unlink()
-                    with contextlib.suppress(Exception):
-                        sample_r2.unlink()
-            
-            # Check if all SRR FASTQs are ready
-            srr_files_r1 = []
-            srr_files_r2 = []
-            all_ready = True
-            
-            for srr_id in sample_data['srr_ids']:
-                srr_r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
-                srr_r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
-                
-                if srr_r1.exists() and srr_r2.exists() and self._gzip_test(srr_r1, srr_r2):
-                    srr_files_r1.append(srr_r1)
-                    srr_files_r2.append(srr_r2)
-                else:
-                    all_ready = False
-                    break
-            
-            if all_ready and srr_files_r1:
-                if len(srr_files_r1) == 1:
-                    # Single SRR: create hard link or copy
-                    logger.info(f"→ Linking {sample_id} to single SRR file")
-                    try:
-                        os.link(srr_files_r1[0], sample_r1)
-                        os.link(srr_files_r2[0], sample_r2)
-                    except OSError:
-                        # If hard link fails, copy the file
-                        shutil.copy2(srr_files_r1[0], sample_r1)
-                        shutil.copy2(srr_files_r2[0], sample_r2)
-                else:
-                    # Multiple SRRs: merge them atomically and log inputs
-                    logger.info(f"→ Merging {len(srr_files_r1)} SRR files for {sample_id}")
-                    logger.info("    Inputs: %s", ",".join([p.stem.replace('_1','').replace('_2','') for p in srr_files_r1]))
-                    tmp1 = self.cancer_dir / f".{sample_id}_1.fastq.gz.tmp"
-                    tmp2 = self.cancer_dir / f".{sample_id}_2.fastq.gz.tmp"
-                    with contextlib.suppress(Exception):
-                        tmp1.unlink()
-                    with contextlib.suppress(Exception):
-                        tmp2.unlink()
-                    ok1 = self._merge_gzip_files(srr_files_r1, tmp1)
-                    ok2 = self._merge_gzip_files(srr_files_r2, tmp2)
-                    if ok1 and ok2 and self._gzip_test(tmp1, tmp2):
-                        tmp1.replace(sample_r1)
-                        tmp2.replace(sample_r2)
-                    else:
-                        logger.error(f"    ✗ Merge failed for {sample_id}; cleaning partial outputs")
-                        with contextlib.suppress(Exception):
-                            tmp1.unlink()
-                        with contextlib.suppress(Exception):
-                            tmp2.unlink()
-    
-    def _merge_gzip_files(self, input_files, output_file) -> bool:
-        """Merge multiple gzipped files into one; return True on success."""
-        try:
-            with gzip.open(output_file, 'wb') as outf:
-                for input_file in input_files:
-                    with gzip.open(input_file, 'rb') as inf:
-                        shutil.copyfileobj(inf, outf)
-            return True
-        except Exception as e:
-            logger.error(f"    ✗ Error during merge into {output_file}: {e}")
-            return False
+    # merge_fastq_files disabled: SRR-level FASTQs are final outputs
 
     def cleanup_empty_srr_dirs(self):
         """Remove empty accession directories (SRR*/ERR*) left by prefetch."""
@@ -377,69 +311,88 @@ class SRAWorkflow:
                         logger.info(f"  ✓ Removed empty directory {entry}")
                 except Exception:
                     pass
+
+    def cleanup_converted_sras_global(self):
+        """Delete any lingering .sra when both paired FASTQs exist and validate."""
+        # Build unique SRR list from samples
+        srr_ids = set()
+        for s in self.samples.values():
+            for sid in s['srr_ids']:
+                srr_ids.add(sid)
+        removed = 0
+        for srr_id in sorted(srr_ids):
+            sra_file = self.cancer_dir / f"{srr_id}.sra"
+            if not sra_file.exists():
+                continue
+            r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
+            r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
+            if r1.exists() and r2.exists() and self._gzip_test(r1, r2):
+                with contextlib.suppress(Exception):
+                    sra_file.unlink()
+                    removed += 1
+        if removed:
+            logger.info(f"  ✓ Global cleanup removed {removed} converted .sra files")
     
     def generate_status_report(self):
-        """Step 4: Generate sample status report"""
+        """Generate sample status report (4 columns, exact format)."""
         logger.info("=" * 50)
-        logger.info("STEP 4: Generate sample status snapshot")
+        logger.info("STEP 3: Generate sample status snapshot")
         logger.info("=" * 50)
         
         status_file = self.cancer_dir / "sample_list.with_status.txt"
-        
-        # Update status for each sample
+        lines = []
         for sample_id, sample_data in self.samples.items():
-            sample_r1 = self.cancer_dir / f"{sample_id}_1.fastq.gz"
-            sample_r2 = self.cancer_dir / f"{sample_id}_2.fastq.gz"
+            srr_ids = sample_data['srr_ids']
+            r1_list = ",".join([f"{sid}_1.fastq.gz" for sid in srr_ids])
+            r2_list = ",".join([f"{sid}_2.fastq.gz" for sid in srr_ids])
+
+            # Determine status by strict priority
+            status = None
+            # 1) DBGaP_REQUIRED
+            for sid in srr_ids:
+                status_path = self.logs_dir / f"prefetch_{sid}.status"
+                if status_path.exists() and "DBGaP_REQUIRED" in status_path.read_text():
+                    status = 'DBGaP_REQUIRED'
+                    break
             
-            if sample_r1.exists() and sample_r2.exists() and self._gzip_test(sample_r1, sample_r2):
-                sample_data['status'] = 'DONE'
-            else:
-                # Check individual SRR statuses
-                has_dbgap = False
-                has_pending = False
-                has_missing = False
-                
-                for srr_id in sample_data['srr_ids']:
-                    srr_r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
-                    srr_r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
-                    sra_file = self.cancer_dir / f"{srr_id}.sra"
-                    status_path = self.logs_dir / f"prefetch_{srr_id}.status"
-                    
-                    if srr_r1.exists() and srr_r2.exists():
-                        continue
-                    elif sra_file.exists():
-                        has_pending = True
-                    elif status_path.exists() and "DBGaP_REQUIRED" in status_path.read_text():
-                        has_dbgap = True
-                    else:
-                        has_missing = True
-                
-                if has_dbgap:
-                    sample_data['status'] = 'DBGaP_REQUIRED'
-                elif has_missing and not has_pending:
-                    sample_data['status'] = 'MISSING'
-                else:
-                    sample_data['status'] = 'PENDING'
-        
-        # Write status file
+            # Check FASTQ completeness once, reuse it
+            all_fastqs_ok = True
+            for sid in srr_ids:
+                r1 = self.cancer_dir / f"{sid}_1.fastq.gz"
+                r2 = self.cancer_dir / f"{sid}_2.fastq.gz"
+                if not (r1.exists() and r2.exists() and self._gzip_test(r1, r2)):
+                    all_fastqs_ok = False
+                    break
+
+            # 2) BAM_DONE (only if all fastqs are good AND bam exists)
+            if status is None and all_fastqs_ok:
+                if any((p.is_file() and p.stat().st_size > 0) for p in self.cancer_dir.glob(f"{sample_id}*.bam")):
+                    status = 'BAM_DONE'
+
+            # 3) FASTQ_DONE
+            if status is None and all_fastqs_ok:
+                status = 'FASTQ_DONE'
+  
+            # 4) PENDING (FASTQ -> BAM, job ID <...>) — not tracked here
+            # 5) PENDING (SRA -> FASTQ, job ID <...>) if any active conversion job
+            if status is None:
+                active_job_id = None
+                for sid in srr_ids:
+                    job_id = self.submitted_jobs.get(sid)
+                    if job_id and self._is_job_active(job_id):
+                        active_job_id = job_id
+                        break
+                if active_job_id:
+                    status = f"PENDING (SRA -> FASTQ, job ID <{active_job_id}>)"
+            # 6) PENDING (SRA downloading, job ID <...>) — not applicable
+            # 7) PENDING fallback
+            if status is None:
+                status = 'PENDING'
+
+            lines.append(f"{sample_id}\t{r1_list}\t{r2_list}\t{status}")
+
         with open(status_file, 'w') as f:
-            for sample_id, sample_data in self.samples.items():
-                f.write(f"{sample_id}\t{sample_data['col2']}\t{sample_data['col3']}\t{sample_data['status']}\n")
-        
-        # Print summary
-        status_counts = defaultdict(int)
-        for sample_data in self.samples.values():
-            status_counts[sample_data['status']] += 1
-        
-        logger.info("\nSummary (by sample status):")
-        for status in ['DONE', 'PENDING', 'DBGaP_REQUIRED', 'MISSING']:
-            count = status_counts.get(status, 0)
-            logger.info(f"  {status}: {count}")
-        
-        # Final counts
-        done_count = sum(1 for s in self.samples.values() if s['status'] == 'DONE')
-        logger.info(f"\nExpected sample-level FASTQ files: {len(self.samples) * 2}")
-        logger.info(f"Current sample-level FASTQ files: {done_count * 2}")
+            f.write("\n".join(lines) + "\n")
     
     def run(self):
         """Execute the complete workflow"""
@@ -457,8 +410,12 @@ class SRAWorkflow:
         self.parse_sample_list()
         self.load_modules()
         self.download_sra_files()
+        # Refresh status after download stage
+        try:
+            self.generate_status_report()
+        except Exception:
+            pass
         self.convert_sra_to_fastq()
-        self.merge_fastq_files()
         self.generate_status_report()
         
         logger.info("=" * 50)

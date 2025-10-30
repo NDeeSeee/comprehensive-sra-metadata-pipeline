@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# POSEIDON FASTQ Workflow Script
+# POSEIDON FASTQ Workflow Script (previously fastq_workflow.sh)
 # Downloads SRA files and converts to FASTQ using sample_list.txt
 # Skips existing files automatically
 
@@ -73,9 +73,9 @@ echo "=========================================="
 echo "STEP 2: Convert SRA to FASTQ"
 echo "=========================================="
 
-# Use the enhanced fdump.sh script
+# Use the enhanced submit_fastq_dump_jobs.sh script
 echo "→ Submitting FASTQ conversion jobs..."
-bash /data/salomonis-archive/FASTQs/NCI-R01/POSEIDON/ValeriiGitRepo/scripts/manual_pipeline/fdump.sh sample_list.txt | bsub
+bash /data/salomonis-archive/FASTQs/NCI-R01/POSEIDON/ValeriiGitRepo/scripts/manual_pipeline/submit_fastq_dump_jobs.sh sample_list.txt | bsub
 
 echo ""
 echo "=========================================="
