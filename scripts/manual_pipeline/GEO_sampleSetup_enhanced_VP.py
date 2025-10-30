@@ -5,6 +5,19 @@ from collections import defaultdict
 
 import pandas as pd
 
+# Hardcoded project directory - script must be run from this location
+POSEIDON_DIR = "/data/salomonis-archive/FASTQs/NCI-R01/POSEIDON"
+
+def check_working_directory():
+    """Check if script is running from the correct POSEIDON directory."""
+    current_dir = os.getcwd()
+    if current_dir != POSEIDON_DIR:
+        print(f"ERROR: You are not in the correct directory!")
+        print(f"Current directory: {current_dir}")
+        print(f"Required directory: {POSEIDON_DIR}")
+        print("Please go to the POSEIDON directory and run the script from there.")
+        sys.exit(1)
+
 
 def infer_cancer_type_from_filename(file_path: str) -> str:
     """Infer cancer type from the input filename by stripping common words.
@@ -71,7 +84,7 @@ def process_dataframe(df: pd.DataFrame, sheet_name: str, cancer_type: str) -> No
         mapping[biosample_id]["fastq_read2"].append(fastq_r2)
 
     # Prepare output directory and write results
-    output_dir = os.path.join("POSEIDON", sheet_name, cancer_type)
+    output_dir = os.path.join(POSEIDON_DIR, sheet_name, cancer_type)
     os.makedirs(output_dir, exist_ok=True)
     output_file = os.path.join(output_dir, "sample_list.txt")
 
@@ -99,6 +112,9 @@ parser.add_argument(
     "metadata_file", help="Path to the metadata file (.csv, .xlsx, or .xls)"
 )
 args = parser.parse_args()
+
+# Check if running from correct directory
+check_working_directory()
 
 # Determine input type and process accordingly
 input_ext = os.path.splitext(args.metadata_file)[1].lower()
