@@ -60,7 +60,7 @@ class CancerTypeSearcher:
         # Remove duplicates and return
         return list(set(variations))
     
-    def search_sra_studies(self, cancer_type: str, max_results: int = 1000) -> List[Dict]:
+    def search_sra_studies(self, cancer_type: str, max_results: int = 5000) -> List[Dict]:
         """
         Search SRA database for studies matching cancer type
         """
@@ -143,7 +143,7 @@ class CancerTypeSearcher:
         
         return all_runs
     
-    def search_ena_studies(self, cancer_type: str, max_results: int = 1000) -> Set[str]:
+    def search_ena_studies(self, cancer_type: str, max_results: int = 5000) -> Set[str]:
         """
         Search ENA database for studies matching cancer type
         """
@@ -192,7 +192,7 @@ class CancerTypeSearcher:
         
         return all_runs
     
-    def search_cancer_type(self, cancer_type: str, max_results: int = 1000) -> Set[str]:
+    def search_cancer_type(self, cancer_type: str, max_results: int = 5000) -> Set[str]:
         """
         Main search function that combines SRA and ENA searches
         """
@@ -222,8 +222,8 @@ def main():
                        help='Cancer type to search for (e.g., "esophageal adenocarcinoma")')
     parser.add_argument('-o', '--output', required=True,
                        help='Output file for SRR IDs')
-    parser.add_argument('-m', '--max-results', type=int, default=1000,
-                       help='Maximum results per source (default: 1000)')
+    parser.add_argument('-m', '--max-results', type=int, default=5000,
+                       help='Maximum results per source (default: 5000)')
     parser.add_argument('--test', action='store_true',
                        help='Run in test mode with limited results')
     

@@ -68,6 +68,13 @@ cd $DIR
 
 fastq-dump --split-files ${SRR_ID}.sra --origfmt --gzip -O .
 
+# If conversion succeeded and produced both FASTQs, remove the source .sra
+if [ -s "${SRR_ID}_1.fastq.gz" ] && [ -s "${SRR_ID}_2.fastq.gz" ]; then
+    rm -f "${SRR_ID}.sra"
+else
+    echo "FASTQ conversion incomplete or failed for ${SRR_ID}; retaining .sra" 1>&2
+fi
+
 EOF
         if [ $? -eq 0 ]; then
             echo "  ✓ Job submitted for ${SRR_ID}"
@@ -104,6 +111,13 @@ module load aspera/3.9.1
 cd $DIR
 
 fastq-dump --split-files $INPUTFILE --origfmt --gzip -O .
+
+# If conversion succeeded and produced both FASTQs, remove the source .sra
+if [ -s "${SAMPLE}_1.fastq.gz" ] && [ -s "${SAMPLE}_2.fastq.gz" ]; then
+    rm -f "${SAMPLE}.sra"
+else
+    echo "FASTQ conversion incomplete or failed for ${SAMPLE}; retaining .sra" 1>&2
+fi
 
 EOF
 fi

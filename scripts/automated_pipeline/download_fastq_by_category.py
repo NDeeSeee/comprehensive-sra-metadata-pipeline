@@ -14,12 +14,11 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 
-# Set up logging
+# Set up base logger; file handler added in main() based on output directory
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('fastq_download.log'),
         logging.StreamHandler()
     ]
 )
@@ -68,7 +67,7 @@ class FASTQDownloader:
                 
                 with open(log_file, 'a') as log:
                     log.write(f"Attempt {attempt + 1}: Starting prefetch for {srr_id}\n")
-                    result = subprocess.run(prefetch_cmd, capture_output=True, text=True, timeout=1800)
+                    result = subprocess.run(prefetch_cmd, capture_output=True, text=True, timeout=1800, cwd=str(category_dir))
                     
                     if result.returncode != 0:
                         log.write(f"Prefetch failed: {result.stderr}\n")
@@ -97,7 +96,7 @@ class FASTQDownloader:
                     
                     with open(log_file, 'a') as log:
                         log.write(f"Converting SRA to FASTQ for {srr_id}\n")
-                        result = subprocess.run(fastq_dump_cmd, capture_output=True, text=True, timeout=1800)
+                        result = subprocess.run(fastq_dump_cmd, capture_output=True, text=True, timeout=1800, cwd=str(category_dir))
                         
                         if result.returncode != 0:
                             log.write(f"Fastq-dump failed: {result.stderr}\n")
@@ -132,7 +131,7 @@ class FASTQDownloader:
         """Download FASTQ files for all SRR IDs in a category"""
         if not srr_list:
             logger.info(f"No SRR IDs found for category {category}")
-            return
+            return 0, 0
         
         if max_downloads:
             srr_list = srr_list[:max_downloads]
@@ -206,6 +205,17 @@ def main():
     
     args = parser.parse_args()
     
+    # Configure logging to file within the chosen output directory
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_file = out_dir / "download.log"
+    file_handler = logging.FileHandler(str(log_file))
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    # Avoid duplicate handlers if re-run in same interpreter
+    existing = [h for h in logger.handlers if isinstance(h, logging.FileHandler) and getattr(h, 'baseFilename', '') == str(log_file)]
+    if not existing:
+        logger.addHandler(file_handler)
+
     # Load and organize SRR IDs by category
     category_srr = load_classified_metadata(args.input)
     

@@ -13,12 +13,11 @@ import time
 from pathlib import Path
 import logging
 
-# Set up logging
+# Set up base logging to console only; file handler added later per run
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('cancer_analysis_pipeline.log'),
         logging.StreamHandler()
     ]
 )
@@ -35,14 +34,24 @@ class CancerAnalysisPipeline:
         
         # Create directory structure
         self.create_directory_structure()
+
+        # Configure file logging to cancer-specific logs directory
+        logs_dir = self.cancer_type_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(str(logs_dir / "cancer_analysis_pipeline.log"))
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        # Avoid duplicate handlers if re-instantiated in same interpreter
+        logger_handlers = [h for h in logger.handlers if isinstance(h, logging.FileHandler) and getattr(h, 'baseFilename', '') == str(logs_dir / "cancer_analysis_pipeline.log")]
+        if not logger_handlers:
+            logger.addHandler(file_handler)
     
     def validate_scripts(self):
         """Validate that all required scripts exist and are executable"""
         required_scripts = [
-            "scripts/cancer_type_search.py",
-            "scripts/comprehensive_metadata_pipeline.sh", 
-            "scripts/cancer_classification.py",
-            "scripts/download_fastq_by_category.py"
+            "scripts/automated_pipeline/cancer_type_search.py",
+            "scripts/automated_pipeline/comprehensive_metadata_pipeline.sh", 
+            "scripts/automated_pipeline/cancer_classification.py",
+            "scripts/automated_pipeline/download_fastq_by_category.py"
         ]
         
         for script in required_scripts:
@@ -89,7 +98,7 @@ class CancerAnalysisPipeline:
         
         # Run cancer type search
         search_cmd = [
-            "python", "scripts/cancer_type_search.py",
+            "python", "scripts/automated_pipeline/cancer_type_search.py",
             "-c", self.cancer_type,
             "-o", str(srr_list_file),
             "-m", str(max_results)
@@ -113,7 +122,7 @@ class CancerAnalysisPipeline:
         
         # Run comprehensive metadata collection
         metadata_cmd = [
-            "bash", "scripts/comprehensive_metadata_pipeline.sh",
+            "bash", "scripts/automated_pipeline/comprehensive_metadata_pipeline.sh",
             "-i", str(srr_list_file),
             "-o", str(self.cancer_type_dir / "metadata")
         ]
@@ -136,7 +145,7 @@ class CancerAnalysisPipeline:
         
         # Run cancer classification
         classify_cmd = [
-            "python", "scripts/cancer_classification.py",
+            "python", "scripts/automated_pipeline/cancer_classification.py",
             "-i", str(metadata_file),
             "-o", str(classified_file)
         ]
@@ -159,7 +168,7 @@ class CancerAnalysisPipeline:
         
         # Run FASTQ download
         download_cmd = [
-            "python", "scripts/download_fastq_by_category.py",
+            "python", "scripts/automated_pipeline/download_fastq_by_category.py",
             "-i", str(classified_file),
             "-o", str(fastq_dir),
             "-w", "4"  # 4 parallel workers

@@ -177,7 +177,7 @@ echo "  - ffq: $(wc -l < "${FFQ_JSONL}") lines"
 
 echo ""
 echo "[8/8] Merging comprehensive metadata …"
-python3 scripts/merge_metadata_maximum.py -i "${OUTDIR}/raw" -o "${OUTDIR}/comprehensive_metadata.tsv"
+python3 scripts/automated_pipeline/merge_metadata_maximum.py -i "${OUTDIR}/raw" -o "${OUTDIR}/comprehensive_metadata.tsv"
 
 echo ""
 echo "=== METADATA MERGE COMPLETE ==="
