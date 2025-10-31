@@ -1,0 +1,21 @@
+# Canonical cancer term definitions
+anus_anal_canal_anorectum:
+  display_name: "Anus, Anal Canal and Anorectum"
+  anatomy_terms:
+    - "anal"
+    - "anal canal"
+    - "anorectal"
+    - "rectal"
+  malignancy_terms:
+    - "cancer"
+    - "carcinoma"
+    - "adenocarcinoma"
+    - "squamous cell carcinoma"
+    - "malignant"
+  search_terms:
+    - "anal squamous cell carcinoma"
+    - "anorectal carcinoma"
+    - "rectal adenocarcinoma"
+    - "anal canal carcinoma"
+    - "rectal cancer"
+  notes: "exclude stool/oral microbiome; focus on human epithelial malignancy"

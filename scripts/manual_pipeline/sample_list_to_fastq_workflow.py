@@ -37,9 +37,29 @@ class SRAWorkflow:
         self.no_wait = no_wait
         self.poll_interval_sec = poll_interval_sec
         self.submitted_jobs = {}  # srr_id -> job_id
-        
+        self.job_poll_cycles = {}  # srr_id -> number of poll cycles observed
+        # Minimal color support
+        # Enable color when terminal supports it or FORCE_COLOR is set (NO_COLOR disables)
+        try:
+            force_color = bool(os.environ.get("FORCE_COLOR"))
+            no_color = bool(os.environ.get("NO_COLOR"))
+            tty_out = sys.stdout.isatty() if hasattr(sys.stdout, "isatty") else False
+            tty_err = sys.stderr.isatty() if hasattr(sys.stderr, "isatty") else False
+            self._use_color = (force_color or tty_out or tty_err) and not no_color
+        except Exception:
+            self._use_color = False
+        self._C_GREEN = "\033[92m"
+        self._C_YELLOW = "\033[93m"
+        self._C_RED = "\033[91m"
+        self._C_CYAN = "\033[96m"
+        self._C_MAGENTA = "\033[95m"
+        self._C_RESET = "\033[0m"
+
         # Create logs directory if needed
         self.logs_dir.mkdir(exist_ok=True)
+
+    def _c(self, text: str, color: str) -> str:
+        return f"{color}{text}{self._C_RESET}" if self._use_color else text
         
     def parse_sample_list(self):
         """Parse sample_list.txt and extract SRR/ERR IDs for each sample"""
@@ -68,11 +88,41 @@ class SRAWorkflow:
         logger.info(f"Found {len(self.samples)} samples")
 
     def _sample_has_bam(self, sample_id: str) -> bool:
-        """Return True if a BAM for this sample exists (sample_id*.bam)."""
+        """Return True if a BAM for this sample exists (sample_id*.bam).
+
+        Checks both the cancer directory root and an optional 'bams/' subdirectory.
+        """
         try:
+            # Check root
             for p in self.cancer_dir.glob(f"{sample_id}*.bam"):
                 if p.is_file() and p.stat().st_size > 0:
                     return True
+            # Check bams/ subdir
+            bams_dir = self.cancer_dir / "bams"
+            if bams_dir.is_dir():
+                for p in bams_dir.glob(f"{sample_id}*.bam"):
+                    if p.is_file() and p.stat().st_size > 0:
+                        return True
+        except Exception:
+            pass
+        return False
+
+    def _has_star_progress_dirs(self, sample_id: str) -> bool:
+        """Return True if any STAR output/progress directories exist for this sample.
+
+        This detects work started by external STAR jobs, e.g. directories like:
+        <sample_id>__STARpass1, <sample_id>__STARgenome, <sample_id>__STARtmp.
+        """
+        try:
+            for pattern in (
+                f"{sample_id}__STARpass1",
+                f"{sample_id}__STARgenome",
+                f"{sample_id}__STARtmp",
+            ):
+                for p in self.cancer_dir.glob(pattern):
+                    if p.is_dir():
+                        # Consider as progress if directory exists (non-empty check optional)
+                        return True
         except Exception:
             pass
         return False
@@ -102,10 +152,14 @@ class SRAWorkflow:
     def download_sra_files(self):
         """Step 1: Download SRA files for all samples"""
         logger.info("=" * 50)
-        logger.info("STEP 1: Download SRA files (if needed)")
+        logger.info(self._c("STEP 1: Download SRA files (if needed)", self._C_CYAN))
         logger.info("=" * 50)
         
         for sample_id, sample_data in self.samples.items():
+            # Skip entire sample if BAM already exists
+            if self._sample_has_bam(sample_id):
+                logger.info(self._c(f"✓ {sample_id}: BAM exists; skipping SRA downloads for all SRRs", self._C_GREEN))
+                continue
             # Download each SRR file for this sample
             for srr_id in sample_data['srr_ids']:
                 self._download_single_sra(srr_id, sample_id)
@@ -118,16 +172,16 @@ class SRAWorkflow:
         
         # Skip if SRR-level FASTQs already exist
         if srr_r1.exists() and srr_r2.exists():
-            logger.info(f"    ✓ {srr_id} FASTQs exist, skipping prefetch")
+            logger.info(self._c(f"    ✓ {srr_id} FASTQs exist, skipping prefetch", self._C_GREEN))
             return
         
         # Skip if SRA file already exists
         if sra_file.exists():
-            logger.info(f"    ✓ {srr_id}.sra already exists")
+            logger.info(self._c(f"    ✓ {srr_id}.sra already exists", self._C_GREEN))
             return
         
         # Download using prefetch
-        logger.info(f"    → Downloading {srr_id}...")
+        logger.info(self._c(f"    → Downloading {srr_id}...", self._C_CYAN))
         log_out = self.logs_dir / f"prefetch_{srr_id}.out.txt"
         log_err = self.logs_dir / f"prefetch_{srr_id}.err.txt"
         
@@ -152,17 +206,17 @@ class SRAWorkflow:
             
             # Check if download succeeded
             if sra_file.exists():
-                logger.info(f"    ✓ {srr_id}.sra downloaded successfully")
+                logger.info(self._c(f"    ✓ {srr_id}.sra downloaded successfully", self._C_GREEN))
             else:
                 # Check for dbGaP access issues
                 with open(log_err, 'r') as f:
                     error_content = f.read().lower()
                     if any(x in error_content for x in ['dbgap', 'unauthorized', 'permission denied', '403']):
-                        logger.warning(f"    ✗ {srr_id}.sra download failed: dbGaP/permission required")
+                        logger.warning(self._c(f"    ✗ {srr_id}.sra download failed: dbGaP/permission required", self._C_YELLOW))
                         status_file = self.logs_dir / f"prefetch_{srr_id}.status"
                         status_file.write_text("DBGaP_REQUIRED")
                     else:
-                        logger.error(f"    ✗ {srr_id}.sra download failed")
+                        logger.error(self._c(f"    ✗ {srr_id}.sra download failed", self._C_RED))
                         
         except Exception as e:
             logger.error(f"Error downloading {srr_id}: {e}")
@@ -170,16 +224,25 @@ class SRAWorkflow:
     def convert_sra_to_fastq(self):
         """Step 2: Convert SRA files to FASTQ format"""
         logger.info("=" * 50)
-        logger.info("STEP 2: Convert SRA to FASTQ")
+        logger.info(self._c("STEP 2: Convert SRA to FASTQ", self._C_CYAN))
         logger.info("=" * 50)
         
         # Path to the conversion script (submit_fastq_dump_jobs.sh)
         fdump_script = Path("/data/salomonis-archive/FASTQs/NCI-R01/POSEIDON/ValeriiGitRepo/scripts/manual_pipeline/submit_fastq_dump_jobs.sh")
         
         jobs_to_wait = {}
+        total_srrs = 0
+        skipped_fastq = 0
+        skipped_dbgap = 0
+        submitted = 0
         for sample_id, sample_data in self.samples.items():
+            # Skip conversion entirely if BAM already exists for this sample
+            if self._sample_has_bam(sample_id):
+                logger.info(self._c(f"✓ {sample_id}: BAM exists; skipping SRA->FASTQ conversion", self._C_GREEN))
+                continue
             
             for srr_id in sample_data['srr_ids']:
+                total_srrs += 1
                 sra_file = self.cancer_dir / f"{srr_id}.sra"
                 srr_r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
                 srr_r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
@@ -187,13 +250,15 @@ class SRAWorkflow:
                 # Skip if already converted or if marked as dbGaP
                 status_file = self.logs_dir / f"prefetch_{srr_id}.status"
                 if status_file.exists() and "DBGaP_REQUIRED" in status_file.read_text():
+                    skipped_dbgap += 1
                     continue
                 
                 if srr_r1.exists() and srr_r2.exists():
+                    skipped_fastq += 1
                     continue
                 
                 if sra_file.exists():
-                    logger.info(f"→ Submitting conversion job for {srr_id}.sra")
+                    logger.info(self._c(f"→ Submitting conversion job for {srr_id}.sra", self._C_CYAN))
                     try:
                         # Capture bsub output from submit_fastq_I_jobs.sh to parse Job ID
                         proc = subprocess.run(
@@ -207,22 +272,35 @@ class SRAWorkflow:
                         if job_id:
                             self.submitted_jobs[srr_id] = job_id
                             jobs_to_wait[srr_id] = job_id
-                            logger.info(f"  ✓ Submitted as Job <{job_id}>")
+                            logger.info(self._c(f"  ✓ Submitted as Job <{job_id}>", self._C_GREEN))
+                            submitted += 1
                         else:
-                            logger.warning("  ! Could not parse Job ID; will proceed without waiting for this SRR")
+                            logger.warning(self._c("  ! Could not parse Job ID; will proceed without waiting for this SRR", self._C_YELLOW))
                     except subprocess.CalledProcessError as e:
-                        logger.error(f"Failed to submit conversion for {srr_id}: {e}")
+                        logger.error(self._c(f"Failed to submit conversion for {srr_id}: {e}", self._C_RED))
+                # If neither FASTQs nor .sra exist, nothing to do for this SRR
         
-        # Optionally wait for jobs to finish and then clean up SRAs
+        logger.info(self._c(f"Summary: SRRs={total_srrs}, skipped_fastq={skipped_fastq}, skipped_dbgap={skipped_dbgap}, submitted={submitted}", self._C_MAGENTA))
+        # Optionally wait for jobs to finish
         if not self.no_wait and jobs_to_wait:
             self._wait_for_jobs_and_cleanup(jobs_to_wait)
-        # Global SRA cleanup pass: remove any .sra with verified FASTQs
-        self.cleanup_converted_sras_global()
-        # Refresh status after conversion stage
+            # After actual conversions, thorough cleanup using gzip test
+            self.cleanup_converted_sras_global()
+        else:
+            logger.info(self._c("No conversions needed; skipping wait.", self._C_CYAN))
+            # Fast cleanup when nothing was submitted (size-only check)
+            self.cleanup_converted_sras_lightweight()
+        # Refresh status after conversion stage (quiet)
         try:
-            self.generate_status_report()
+            self.generate_status_report(log_header=False)
         except Exception as e:
             logger.warning(f"Failed to update status report: {e}")
+
+        # If BAMs exist, perform final cleanup of SRAs and FASTQs for those samples
+        try:
+            self.cleanup_artifacts_for_completed_samples()
+        except Exception as e:
+            logger.warning(self._c(f"Final cleanup skipped due to error: {e}", self._C_YELLOW))
 
     def _parse_bsub_job_id(self, text: str):
         match = re.search(r"Job\s*<(\d+)>", text or "")
@@ -247,33 +325,48 @@ class SRAWorkflow:
         return status in ('PEND', 'RUN', 'PSUSP', 'USUSP', 'SSUSP')
 
     def _gzip_test(self, *paths: Path) -> bool:
+        """Validate gzip files quickly without long blocking.
+
+        - Prefer `gzip -t` with a timeout.
+        - Fallback: read a small chunk via Python gzip to check header.
+        """
         try:
             cmd = ['gzip', '-t'] + [str(p) for p in paths]
-            r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
             return r.returncode == 0
+        except subprocess.TimeoutExpired:
+            return False
         except Exception:
-            # Fallback: try opening with Python gzip
             try:
                 for p in paths:
                     with gzip.open(p, 'rb') as f:
-                        while f.read(1024 * 1024):
-                            pass
+                        f.read(4096)
                 return True
             except Exception:
                 return False
 
     def _wait_for_jobs_and_cleanup(self, jobs_to_wait: dict):
-        logger.info("Waiting for conversion jobs to finish...")
+        logger.info(self._c("Waiting for conversion jobs to finish...", self._C_CYAN))
         remaining = dict(jobs_to_wait)
         while remaining:
             finished = []
             for srr_id, job_id in remaining.items():
+                # Fast path: if FASTQs are already present and valid, finish regardless of scheduler status
+                srr_r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
+                srr_r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
+                sra_file = self.cancer_dir / f"{srr_id}.sra"
+                if srr_r1.exists() and srr_r2.exists() and self._gzip_test(srr_r1, srr_r2):
+                    if sra_file.exists():
+                        with contextlib.suppress(Exception):
+                            sra_file.unlink()
+                            logger.info(self._c(f"  ✓ Cleaned {srr_id}.sra after successful conversion", self._C_GREEN))
+                    finished.append(srr_id)
+                    continue
+
                 status = self._bjobs_status(job_id)
-                if status in ('DONE', 'EXIT', 'ZOMBIE', 'UNKNOWN'):
+                # Treat common terminal/unknown states as finished
+                if status in ('DONE', 'EXIT', 'ZOMBIE', 'ZOMBI', 'UNKNOWN', 'UNKWN'):
                     # Check outputs regardless of status
-                    srr_r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
-                    srr_r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
-                    sra_file = self.cancer_dir / f"{srr_id}.sra"
                     if srr_r1.exists() and srr_r2.exists() and self._gzip_test(srr_r1, srr_r2):
                         if sra_file.exists():
                             try:
@@ -283,16 +376,26 @@ class SRAWorkflow:
                                 logger.warning(f"  ! Could not remove {srr_id}.sra: {e}")
                         finished.append(srr_id)
                     else:
-                        if status == 'DONE':
-                            logger.warning(f"  ! {srr_id} job DONE but FASTQs missing or invalid; keeping .sra")
+                        if status in ('DONE', 'EXIT'):
+                            logger.warning(self._c(f"  ! {srr_id} job {status} but FASTQs missing/invalid; keeping .sra", self._C_YELLOW))
+                        elif status in ('ZOMBIE', 'ZOMBI', 'UNKNOWN', 'UNKWN'):
+                            logger.warning(self._c(f"  ! {srr_id} job {status}; FASTQs missing; treating as finished", self._C_YELLOW))
                         finished.append(srr_id)
                 # else still running (e.g., RUN, PEND)
+                else:
+                    # Detect stuck jobs: if status stays non-terminal for many cycles, break out with warning
+                    cycles = self.job_poll_cycles.get(srr_id, 0) + 1
+                    self.job_poll_cycles[srr_id] = cycles
+                    if cycles >= 30:  # ~30 minutes at default poll interval
+                        logger.warning(self._c(f"  ! {srr_id} appears stuck in status {status} for {cycles} cycles; marking finished without FASTQs", self._C_YELLOW))
+                        finished.append(srr_id)
             # Remove finished from remaining
             for s in finished:
                 remaining.pop(s, None)
             # Periodic status refresh each poll cycle
             try:
-                self.generate_status_report()
+                logger.info(self._c(f"Remaining conversion jobs: {len(remaining)}", self._C_CYAN))
+                self.generate_status_report(log_header=False)
             except Exception:
                 pass
             if remaining:
@@ -308,7 +411,7 @@ class SRAWorkflow:
                 try:
                     if not any(entry.iterdir()):
                         entry.rmdir()
-                        logger.info(f"  ✓ Removed empty directory {entry}")
+                        logger.info(self._c(f"  ✓ Removed empty directory {entry}", self._C_GREEN))
                 except Exception:
                     pass
 
@@ -331,13 +434,71 @@ class SRAWorkflow:
                     sra_file.unlink()
                     removed += 1
         if removed:
-            logger.info(f"  ✓ Global cleanup removed {removed} converted .sra files")
+            logger.info(self._c(f"  ✓ Global cleanup removed {removed} converted .sra files", self._C_GREEN))
+
+    def cleanup_artifacts_for_completed_samples(self):
+        """If a sample has a BAM, remove its SRR .sra and FASTQs to free space.
+
+        This is more aggressive than conversion cleanup and runs after STEP 2.
+        """
+        total_sra_removed = 0
+        total_fastq_removed = 0
+        for sample_id, sample_data in self.samples.items():
+            if not self._sample_has_bam(sample_id):
+                continue
+            for srr_id in sample_data['srr_ids']:
+                sra_file = self.cancer_dir / f"{srr_id}.sra"
+                r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
+                r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
+                with contextlib.suppress(Exception):
+                    if sra_file.exists():
+                        sra_file.unlink()
+                        total_sra_removed += 1
+                with contextlib.suppress(Exception):
+                    if r1.exists():
+                        r1.unlink()
+                        total_fastq_removed += 1
+                with contextlib.suppress(Exception):
+                    if r2.exists():
+                        r2.unlink()
+                        total_fastq_removed += 1
+        if total_sra_removed or total_fastq_removed:
+            logger.info(self._c(
+                f"  ✓ Final cleanup (BAM present): removed {total_sra_removed} .sra and {total_fastq_removed} FASTQ files",
+                self._C_GREEN
+            ))
+
+    def cleanup_converted_sras_lightweight(self):
+        """Remove .sra files when both FASTQs exist and are non-empty (no gzip validation)."""
+        srr_ids = set()
+        for s in self.samples.values():
+            for sid in s['srr_ids']:
+                srr_ids.add(sid)
+        removed = 0
+        for srr_id in sorted(srr_ids):
+            sra_file = self.cancer_dir / f"{srr_id}.sra"
+            if not sra_file.exists():
+                continue
+            r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
+            r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
+            try:
+                if r1.exists() and r2.exists() and r1.stat().st_size > 0 and r2.stat().st_size > 0:
+                    with contextlib.suppress(Exception):
+                        sra_file.unlink()
+                        removed += 1
+            except Exception:
+                continue
+        if removed:
+            logger.info(self._c(f"  ✓ Lightweight cleanup removed {removed} converted .sra files", self._C_GREEN))
+        else:
+            logger.info(self._c("  ✓ Lightweight cleanup: no .sra files to remove", self._C_GREEN))
     
-    def generate_status_report(self):
+    def generate_status_report(self, log_header: bool = True):
         """Generate sample status report (4 columns, exact format)."""
-        logger.info("=" * 50)
-        logger.info("STEP 3: Generate sample status snapshot")
-        logger.info("=" * 50)
+        if log_header:
+            logger.info("=" * 50)
+            logger.info("STEP 3: Generate sample status snapshot")
+            logger.info("=" * 50)
         
         status_file = self.cancer_dir / "sample_list.with_status.txt"
         lines = []
@@ -355,26 +516,42 @@ class SRAWorkflow:
                     status = 'DBGaP_REQUIRED'
                     break
             
-            # Check FASTQ completeness once, reuse it
+            # Fast checks (existence and size only) for status reporting
             all_fastqs_ok = True
+            any_fastq_missing = False
+            any_sra_present_missing_fastq = False
+            any_missing_both = False
             for sid in srr_ids:
                 r1 = self.cancer_dir / f"{sid}_1.fastq.gz"
                 r2 = self.cancer_dir / f"{sid}_2.fastq.gz"
-                if not (r1.exists() and r2.exists() and self._gzip_test(r1, r2)):
+                sra = self.cancer_dir / f"{sid}.sra"
+                try:
+                    r1_ok = r1.exists() and r1.stat().st_size > 0
+                    r2_ok = r2.exists() and r2.stat().st_size > 0
+                except Exception:
+                    r1_ok = r2_ok = False
+                if not (r1_ok and r2_ok):
                     all_fastqs_ok = False
-                    break
+                    any_fastq_missing = True
+                    if sra.exists():
+                        any_sra_present_missing_fastq = True
+                    else:
+                        any_missing_both = True
 
             # 2) BAM_DONE (only if all fastqs are good AND bam exists)
             if status is None and all_fastqs_ok:
-                if any((p.is_file() and p.stat().st_size > 0) for p in self.cancer_dir.glob(f"{sample_id}*.bam")):
+                if self._sample_has_bam(sample_id):
                     status = 'BAM_DONE'
 
-            # 3) FASTQ_DONE
+            # 3) ALIGN_IN_PROGRESS if STAR work directories exist
             if status is None and all_fastqs_ok:
-                status = 'FASTQ_DONE'
+                if self._has_star_progress_dirs(sample_id):
+                    status = 'ALIGN_IN_PROGRESS'
+                else:
+                    # 4) FASTQ_DONE
+                    status = 'FASTQ_DONE'
   
-            # 4) PENDING (FASTQ -> BAM, job ID <...>) — not tracked here
-            # 5) PENDING (SRA -> FASTQ, job ID <...>) if any active conversion job
+            # 5) CONVERTING (SRA -> FASTQ, job ID <...>) if any active conversion job
             if status is None:
                 active_job_id = None
                 for sid in srr_ids:
@@ -383,11 +560,19 @@ class SRAWorkflow:
                         active_job_id = job_id
                         break
                 if active_job_id:
-                    status = f"PENDING (SRA -> FASTQ, job ID <{active_job_id}>)"
-            # 6) PENDING (SRA downloading, job ID <...>) — not applicable
-            # 7) PENDING fallback
+                    status = f"CONVERTING (SRA -> FASTQ, job ID <{active_job_id}>)"
+
+            # 6) NEEDS_CONVERSION if any .sra exists and some FASTQs missing
+            if status is None and any_sra_present_missing_fastq:
+                status = 'NEEDS_CONVERSION'
+
+            # 7) NEEDS_PREFETCH if no .sra and some FASTQs missing
+            if status is None and any_missing_both and any_fastq_missing:
+                status = 'NEEDS_PREFETCH'
+
+            # 8) UNKNOWN fallback (should be rare)
             if status is None:
-                status = 'PENDING'
+                status = 'UNKNOWN'
 
             lines.append(f"{sample_id}\t{r1_list}\t{r2_list}\t{status}")
 
@@ -410,16 +595,28 @@ class SRAWorkflow:
         self.parse_sample_list()
         self.load_modules()
         self.download_sra_files()
-        # Refresh status after download stage
+        # Refresh status after download stage (quiet)
         try:
-            self.generate_status_report()
+            self.generate_status_report(log_header=False)
         except Exception:
             pass
         self.convert_sra_to_fastq()
         self.generate_status_report()
         
         logger.info("=" * 50)
-        logger.info("WORKFLOW COMPLETE")
+        # Minimal colorized completion message for better skimmability
+        try:
+            class _Ansi:
+                GREEN = "\033[92m"
+                RESET = "\033[0m"
+            def _color(txt: str, code: str) -> str:
+                try:
+                    return f"{code}{txt}{_Ansi.RESET}" if sys.stdout.isatty() else txt
+                except Exception:
+                    return txt
+            logger.info(_color("WORKFLOW COMPLETE", _Ansi.GREEN))
+        except Exception:
+            logger.info("WORKFLOW COMPLETE")
         logger.info("=" * 50)
         logger.info("Check job status with: bjobs")
         logger.info(f"Monitor logs in: {self.logs_dir}/")

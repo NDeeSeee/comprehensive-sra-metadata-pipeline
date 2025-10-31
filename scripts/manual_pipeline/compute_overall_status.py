@@ -3,12 +3,29 @@ import os
 import sys
 from collections import defaultdict
 
-ROOT = "/data/salomonis-archive/FASTQs/NCI-R01/POSEIDON"
+# Default project root; allow override via CLI arg or POSEIDON_DIR env var
+DEFAULT_ROOT = "/data/salomonis-archive/FASTQs/NCI-R01/POSEIDON"
+
+
+def _prune_heavy_dirs(dirnames: list):
+    """Remove directories we never need to descend into for status discovery."""
+    # Keep this conservative; only skip well-known heavy dirs
+    skip = {
+        "Master_Project",  # contains outputs like overall_status.md
+        "star_output",     # aggregated STAR outputs, no sample_list files
+        "logs",            # log directories can be huge
+        "bams",            # BAM outputs, not holding sample_list files
+        ".git",
+        "__pycache__",
+    }
+    # Modify in-place
+    dirnames[:] = [d for d in dirnames if d not in skip]
 
 
 def find_sample_dirs(root: str):
     sample_dirs = set()
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+        _prune_heavy_dirs(dirnames)
         if "sample_list.txt" in filenames:
             sample_dirs.add(dirpath)
     return sample_dirs
@@ -16,33 +33,43 @@ def find_sample_dirs(root: str):
 
 def find_status_dirs(root: str):
     status_dirs = set()
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+        _prune_heavy_dirs(dirnames)
         if "sample_list.with_status.txt" in filenames:
             status_dirs.add(dirpath)
     return status_dirs
 
 
-def cancer_label(dir_path: str) -> str:
-    # Use first two path components under ROOT as the cancer type label
-    rel = os.path.relpath(dir_path, ROOT)
+def cancer_label(dir_path: str, root: str) -> str:
+    """Return a concise label relative to the effective root.
+
+    Prefer the first two path components to keep the table width reasonable,
+    but work correctly for any root passed at runtime.
+    """
+    rel = os.path.relpath(dir_path, root)
+    if rel == ".":  # if the directory is the root itself, show its name
+        return os.path.basename(os.path.abspath(root))
     parts = rel.split(os.sep)
     return "/".join(parts[:2]) if len(parts) >= 2 else parts[0]
 
 
 def tally_status(status: str, acc: dict):
+    # Normalize to new status names from sample_list_to_fastq_workflow
     if status == "DBGaP_REQUIRED":
         acc["dbgap_required"] += 1
     elif status == "BAM_DONE":
         acc["bam_done"] += 1
     elif status == "FASTQ_DONE":
         acc["fastq_done"] += 1
-    elif status.startswith("PENDING (FASTQ -> BAM"):
+    elif status == "ALIGN_IN_PROGRESS":
         acc["pending_fastq_to_bam"] += 1
-    elif status.startswith("PENDING (SRA -> FASTQ"):
+    elif status.startswith("CONVERTING"):
         acc["pending_sra_to_fastq"] += 1
-    elif status.startswith("PENDING (SRA downloading"):
+    elif status == "NEEDS_CONVERSION":
+        acc["pending_sra_to_fastq"] += 1
+    elif status == "NEEDS_PREFETCH":
         acc["pending_sra_downloading"] += 1
-    elif status == "PENDING":
+    elif status in ("PENDING", "UNKNOWN"):
         acc["pending"] += 1
     else:
         acc["pending"] += 1  # fallback
@@ -86,19 +113,29 @@ def compute_action_required(has_sample_list: bool, has_status: bool, acc: dict) 
         return "WAIT"
     if done_bam == exp and exp > 0:
         return "NONE"
-    if done_fastq == exp and exp > 0 and done_bam < exp:
+    # optional alignment when all samples are at least FASTQ_DONE or BAM_DONE
+    if (done_bam + done_fastq) == exp and exp > 0 and done_bam < exp:
         return "OPTIONAL_BAM_ALIGNMENT"
     if exp > (blocked + done_fastq + done_bam):
         return "START_SRA_DOWNLOADING"
+    # Do not emit REQUEST_ACCESS here; we already show dbgap_required in a dedicated column
     if blocked > 0 and (done_bam + done_fastq + blocked) == exp:
-        return "REQUEST_ACCESS"
+        return "NONE"
     return "CHECK_MANUALLY"
 
 
 def main():
     # Usage: compute_overall_status.py [root_dir] [out_md]
-    root = sys.argv[1] if len(sys.argv) > 1 else ROOT
-    out_path = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, "Master_Project", "overall_status.md")
+    if len(sys.argv) > 1:
+        root = os.path.abspath(sys.argv[1])
+    else:
+        root = os.path.abspath(os.environ.get("POSEIDON_DIR", DEFAULT_ROOT))
+
+    out_path = (
+        sys.argv[2]
+        if len(sys.argv) > 2
+        else os.path.join(root, "Master_Project", "overall_status.md")
+    )
 
     sample_dirs = find_sample_dirs(root)
     status_dirs = find_status_dirs(root)
@@ -136,15 +173,21 @@ def main():
                 pass
         # Compute directory-level action_required
         action_required = compute_action_required(has_sample_list, has_status, acc)
-        per_dir_stats[dir_path] = (cancer_label(dir_path), action_required, acc)
+        per_dir_stats[dir_path] = (cancer_label(dir_path, root), action_required, acc)
 
     # Build Markdown table content
     header = "| " + " | ".join(essential_cols) + " |"
-    sep_cells = ["---"] + ["---:"] * (len(essential_cols) - 1)
+    # Left-align the first two columns (labels), right-align numeric columns
+    sep_cells = []
+    for idx, _ in enumerate(essential_cols):
+        if idx < 2:
+            sep_cells.append(":---")
+        else:
+            sep_cells.append("---:")
     separator = "| " + " | ".join(sep_cells) + " |"
     lines = [header, separator]
 
-    for dir_path in sorted(per_dir_stats.keys(), key=lambda p: cancer_label(p)):
+    for dir_path in sorted(per_dir_stats.keys(), key=lambda p: cancer_label(p, root)):
         label, action_required, acc = per_dir_stats[dir_path]
         if action_required.startswith("RUN "):
             # Replace numeric columns with None for RUN actions to avoid misleading zeros

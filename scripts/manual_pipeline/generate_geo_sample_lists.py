@@ -10,6 +10,10 @@ from collections import defaultdict
 from typing import List, Optional
 
 import pandas as pd
+import subprocess
+import re
+from urllib import request as urlrequest
+from urllib import error as urlerror
 
 # Hardcoded project directory - script must be run from this location
 POSEIDON_DIR = "/data/salomonis-archive/FASTQs/NCI-R01/POSEIDON"
@@ -84,20 +88,33 @@ def process_dataframe(df: pd.DataFrame, sheet_name: str, cancer_type: str) -> No
         fastq_r2 = f"{srr_id}_2.fastq.gz"
         sra_file = f"{srr_id}.sra"
 
-        # Include all rows regardless of file existence
-        mapping[biosample_id]["srr_ids"].append(srr_id)
-        mapping[biosample_id]["fastq_read1"].append(fastq_r1)
-        mapping[biosample_id]["fastq_read2"].append(fastq_r2)
+        # Avoid duplicate SRR entries per BioSample
+        entry = mapping[biosample_id]
+        if srr_id not in entry["srr_ids"]:
+            entry["srr_ids"].append(srr_id)
+            entry["fastq_read1"].append(fastq_r1)
+            entry["fastq_read2"].append(fastq_r2)
 
     # Prepare output directory and write results
     output_dir = os.path.join(POSEIDON_DIR, sheet_name, cancer_type)
     os.makedirs(output_dir, exist_ok=True)
     output_file = os.path.join(output_dir, "sample_list.txt")
 
+    def _stable_unique(seq):
+        seen = set()
+        out = []
+        for x in seq:
+            if x not in seen:
+                seen.add(x)
+                out.append(x)
+        return out
+
     with open(output_file, "w") as fh:
         for biosample_id, info in mapping.items():
-            fastq_read1_joined = ",".join(info["fastq_read1"])
-            fastq_read2_joined = ",".join(info["fastq_read2"])
+            r1_list = _stable_unique(info["fastq_read1"])
+            r2_list = _stable_unique(info["fastq_read2"])
+            fastq_read1_joined = ",".join(r1_list)
+            fastq_read2_joined = ",".join(r2_list)
             fh.write(f"{biosample_id}\t{fastq_read1_joined}\t{fastq_read2_joined}\n")
 
     # Optional console output for traceability
@@ -112,10 +129,28 @@ def process_dataframe(df: pd.DataFrame, sheet_name: str, cancer_type: str) -> No
 
 # CLI
 parser = argparse.ArgumentParser(
-    description="Process metadata (CSV or Excel) and organize files by BioSample."
+    description=(
+        "Generate POSEIDON sample_list.txt from metadata or SRR list. "
+        "Accepts Excel (.xlsx/.xls), CSV (.csv), or a plain text file (.txt) "
+        "with one SRR/ERR accession per line."
+    )
 )
 parser.add_argument(
-    "metadata_file", help="Path to the metadata file (.csv, .xlsx, or .xls)"
+    "metadata_file",
+    help=(
+        "Path to input: Excel/CSV metadata (expects BioSample & Run columns) "
+        "or TXT file with one SRR/ERR ID per line"
+    ),
+)
+parser.add_argument(
+    "-o",
+    "--output-dir",
+    dest="output_dir",
+    default=None,
+    help=(
+        "Directory to write sample_list.txt. If omitted, writes to "
+        "POSEIDON/<Sheet>/<CancerType>/sample_list.txt"
+    ),
 )
 args = parser.parse_args()
 
@@ -123,14 +158,164 @@ args = parser.parse_args()
 check_working_directory()
 
 # Determine input type and process accordingly
-input_ext = os.path.splitext(args.metadata_file)[1].lower()
-cancer_type = infer_cancer_type_from_filename(args.metadata_file)
+# Use absolute path to be robust when wrappers change directories
+input_path = os.path.abspath(args.metadata_file)
+input_ext = os.path.splitext(input_path)[1].lower()
+cancer_type = infer_cancer_type_from_filename(input_path)
+output_dir_override = os.path.abspath(args.output_dir) if args.output_dir else None
+
+def _write_sample_list(
+    mapping: dict,
+    sheet_name: str,
+    cancer_type: str,
+    output_dir_override: Optional[str] = None,
+) -> str:
+    """Write mapping to sample_list.txt and return the output path.
+
+    mapping format: { sample_id: {"fastq_read1": [...], "fastq_read2": [...]} }
+    """
+    output_dir = output_dir_override or os.path.join(POSEIDON_DIR, sheet_name, cancer_type)
+    os.makedirs(output_dir, exist_ok=True)
+    output_file = os.path.join(output_dir, "sample_list.txt")
+    with open(output_file, "w") as fh:
+        for sample_id, info in mapping.items():
+            fastq_read1_joined = ",".join(info["fastq_read1"]) if info["fastq_read1"] else ""
+            fastq_read2_joined = ",".join(info["fastq_read2"]) if info["fastq_read2"] else ""
+            fh.write(f"{sample_id}\t{fastq_read1_joined}\t{fastq_read2_joined}\n")
+    return output_file
+
+def _resolve_biosample_for_srr(srr_id: str) -> Optional[str]:
+    """Return BioSample accession (e.g., SAMNxxxxx) for an SRR using sra-tools; fallback to ENA.
+
+    Strategy:
+    1) Try `vdb-dump` (sra-tools) in info/JSON modes and extract SAMN[0-9]+.
+    2) Fallback to ENA filereport API for biosample_accession.
+    """
+    # Prefer ENA first for speed; then NCBI efetch XML; then vdb-dump
+    try:
+        url = (
+            "https://www.ebi.ac.uk/ena/portal/api/filereport?"
+            f"accession={srr_id}&result=read_run&fields=run_accession,biosample_accession&format=tsv"
+        )
+        with urlrequest.urlopen(url, timeout=5) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+        lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+        if len(lines) >= 2:
+            header = lines[0].split("\t")
+            row = lines[1].split("\t")
+            if "biosample_accession" in header:
+                idx = header.index("biosample_accession")
+                biosample = row[idx].strip()
+                if biosample:
+                    return biosample
+    except (urlerror.URLError, TimeoutError, Exception):
+        pass
+
+    # NCBI efetch (SRA XML) fallback
+    try:
+        url = (
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?"
+            f"db=sra&id={srr_id}&rettype=full&retmode=xml"
+        )
+        with urlrequest.urlopen(url, timeout=6) as resp:
+            xml_text = resp.read().decode("utf-8", errors="ignore")
+        m = re.search(r"SAMN\d+", xml_text)
+        if m:
+            return m.group(0)
+    except (urlerror.URLError, TimeoutError, Exception):
+        pass
+
+    # vdb-dump in JSON mode
+    try:
+        proc = subprocess.run(
+            ["vdb-dump", srr_id, "-J"], capture_output=True, text=True, check=False, timeout=8
+        )
+        text = (proc.stdout or "") + (proc.stderr or "")
+        m = re.search(r"SAMN\d+", text)
+        if m:
+            return m.group(0)
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception:
+        pass
+
+    # vdb-dump --info mode
+    try:
+        proc = subprocess.run(
+            ["vdb-dump", srr_id, "--info"], capture_output=True, text=True, check=False, timeout=8
+        )
+        text = (proc.stdout or "") + (proc.stderr or "")
+        m = re.search(r"SAMN\d+", text)
+        if m:
+            return m.group(0)
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception:
+        pass
+
+    return None
+
+
+def process_srr_txt(file_path: str, cancer_type: str, output_dir_override: Optional[str] = None) -> None:
+    """Process a TXT file containing one SRR/ERR accession per line.
+
+    Generates POSEIDON/<sheet_name>/<cancer_type>/sample_list.txt where sheet_name is 'SRR'.
+    Each SRR becomes its own sample_id row with R1/R2 FASTQ filenames.
+    """
+    srr_ids = []
+    with open(file_path, "r") as fh:
+        for raw in fh:
+            val = (raw or "").strip()
+            if not val:
+                continue
+            token = val.split()[0]  # allow whitespace-separated values, take first token
+            if token.upper().startswith(("SRR", "ERR")) and token[3:].isdigit():
+                srr_ids.append(token)
+            else:
+                # silently skip lines that do not look like SRR/ERR accessions
+                continue
+
+    if not srr_ids:
+        print(f"No SRR/ERR accessions found in: {file_path}")
+        return
+
+    print(f"Resolving BioSample accessions for {len(srr_ids)} SRRs...", flush=True)
+    print("Press Ctrl-C to stop early; partial output will be written.", flush=True)
+    # Group SRRs by BioSample when available; fallback to SRR as its own sample_id
+    mapping = {}
+    try:
+        for idx, srr in enumerate(srr_ids, start=1):
+            print(f"  [{idx}/{len(srr_ids)}] {srr}", flush=True)
+            biosample = _resolve_biosample_for_srr(srr)
+            sample_id = biosample if biosample else srr
+            entry = mapping.setdefault(sample_id, {"fastq_read1": [], "fastq_read2": []})
+            r1 = f"{srr}_1.fastq.gz"
+            r2 = f"{srr}_2.fastq.gz"
+            if r1 not in entry["fastq_read1"]:
+                entry["fastq_read1"].append(r1)
+            if r2 not in entry["fastq_read2"]:
+                entry["fastq_read2"].append(r2)
+    except KeyboardInterrupt:
+        print("Interrupted by user. Writing partial sample_list.txt...", flush=True)
+
+    out_path = _write_sample_list(
+        mapping,
+        sheet_name="SRR",
+        cancer_type=cancer_type,
+        output_dir_override=output_dir_override,
+    )
+
+    for sample_id, info in mapping.items():
+        # Derive SRR IDs back from fastq names for display
+        srrs = sorted({p.split("_")[0] for p in info["fastq_read1"]})
+        print(f"Sample: {sample_id} -> Associated SRR IDs: {', '.join(srrs)}")
+    print(f"Wrote {len(mapping)} rows to: {out_path}")
 
 if input_ext in {".xlsx", ".xls"}:
     # Expected sheet names to iterate
     target_sheets = ["Tumors", "Controls", "Bulk_CellTypes", "Premalignant"]
     try:
-        excel_file = pd.ExcelFile(args.metadata_file)
+        excel_file = pd.ExcelFile(input_path)
     except Exception as e:
         print(f"Failed to open Excel file: {e}")
         sys.exit(1)
@@ -138,7 +323,7 @@ if input_ext in {".xlsx", ".xls"}:
     available = set(excel_file.sheet_names)
     
     # Report sheet status
-    print(f"Excel file: {args.metadata_file}")
+    print(f"Excel file: {input_path}")
     print(f"Available sheets: {sorted(available)}")
     print(f"Target sheets: {target_sheets}")
     
@@ -157,11 +342,11 @@ if input_ext in {".xlsx", ".xls"}:
             extra_sheets.append(sheet)
     
     print(f"\nSheet Analysis:")
-    print(f"✓ Found target sheets: {found_sheets}")
+    print(f"? Found target sheets: {found_sheets}")
     if missing_sheets:
-        print(f"✗ Missing target sheets: {missing_sheets}")
+        print(f"? Missing target sheets: {missing_sheets}")
     if extra_sheets:
-        print(f"ℹ Extra sheets (not processed): {extra_sheets}")
+        print(f"? Extra sheets (not processed): {extra_sheets}")
     print()
     
     # Process found sheets
@@ -170,8 +355,14 @@ if input_ext in {".xlsx", ".xls"}:
         df_sheet = pd.read_excel(excel_file, sheet_name=sheet)
         process_dataframe(df_sheet, sheet, cancer_type)
         print()
-else:
+elif input_ext in {".csv"}:
     # Backwards compatibility: CSV processing writes under POSEIDON/CSV/<CancerType>
-    df = pd.read_csv(args.metadata_file, delimiter=",")
+    df = pd.read_csv(input_path, delimiter=",")
     # Use a neutral placeholder for sheet to avoid changing CSV behavior
     process_dataframe(df, sheet_name="CSV", cancer_type=cancer_type)
+elif input_ext in {".txt"}:
+    # New: SRR/ERR list mode (one accession per line)
+    process_srr_txt(input_path, cancer_type=cancer_type, output_dir_override=output_dir_override)
+else:
+    print(f"Unsupported input extension '{input_ext}'. Expected one of: .xlsx, .xls, .csv, .txt")
+    sys.exit(1)

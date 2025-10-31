@@ -8,6 +8,7 @@ import os
 import sys
 import subprocess
 import argparse
+import json
 import pandas as pd
 import time
 from pathlib import Path
@@ -49,6 +50,7 @@ class CancerAnalysisPipeline:
         """Validate that all required scripts exist and are executable"""
         required_scripts = [
             "scripts/automated_pipeline/cancer_type_search.py",
+            "scripts/automated_pipeline/cohort_builder.py",
             "scripts/automated_pipeline/comprehensive_metadata_pipeline.sh", 
             "scripts/automated_pipeline/cancer_classification.py",
             "scripts/automated_pipeline/download_fastq_by_category.py"
@@ -114,27 +116,62 @@ class CancerAnalysisPipeline:
         logger.info(f"Cancer type search completed. SRR list saved to {srr_list_file}")
         return True
     
-    def step2_collect_metadata(self, srr_list_file):
-        """Step 2: Collect comprehensive metadata for SRR IDs"""
-        logger.info("Step 2: Collecting comprehensive metadata")
-        
-        metadata_file = self.cancer_type_dir / "metadata" / "comprehensive_metadata.tsv"
-        
-        # Run comprehensive metadata collection
+    def step2_collect_metadata(self, max_results=1000):
+        """Step 2: Build cohort and collect comprehensive metadata with QC"""
+        logger.info("Step 2: Building cohort and collecting comprehensive metadata")
+
+        metadata_dir = self.cancer_type_dir / "metadata"
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+        metadata_file = metadata_dir / "comprehensive_metadata.tsv"
+        manifest_file = metadata_dir / "cohort_manifest.json"
+
+        # Prefer the wrapper script for compatibility; it invokes the Python cohort builder
         metadata_cmd = [
             "bash", "scripts/automated_pipeline/comprehensive_metadata_pipeline.sh",
-            "-i", str(srr_list_file),
-            "-o", str(self.cancer_type_dir / "metadata")
+            "-c", self.cancer_type,
+            "-o", str(metadata_dir),
+            "-y", "data/cancer_terms.yml",
+            "-m", str(max_results)
         ]
-        
+
         logger.info(f"Running: {' '.join(metadata_cmd)}")
         result = subprocess.run(metadata_cmd, capture_output=True, text=True)
-        
-        if result.returncode != 0:
-            logger.error(f"Metadata collection failed: {result.stderr}")
+
+        # Log stdout/stderr to file as well
+        (self.cancer_type_dir / "logs").mkdir(exist_ok=True)
+        with open(self.cancer_type_dir / "logs" / "metadata_stage.log", "w") as fh:
+            fh.write(result.stdout or "")
+            fh.write("\n--- STDERR ---\n")
+            fh.write(result.stderr or "")
+
+        if result.returncode not in (0, 2):
+            logger.error(f"Metadata cohort builder failed (exit {result.returncode}). See logs and {manifest_file} if present.")
             return False
-        
-        logger.info(f"Metadata collection completed. Results saved to {metadata_file}")
+
+        # Inspect manifest for counts and decide whether to proceed
+        if not manifest_file.exists():
+            logger.error("Manifest file not found after metadata stage. Aborting.")
+            return False
+
+        try:
+            manifest = json.loads(manifest_file.read_text())
+        except Exception as e:
+            logger.error(f"Failed to parse cohort manifest: {e}")
+            return False
+
+        n_after_qc = int(manifest.get("n_after_metadata_qc", 0))
+        if n_after_qc == 0:
+            if result.returncode == 2:
+                logger.error("Cohort is biologically empty after QC. Aborting early by design.")
+            else:
+                logger.error("Cohort manifest indicates zero samples after QC. Aborting.")
+            return False
+
+        if not metadata_file.exists():
+            logger.error("Expected comprehensive_metadata.tsv not found.")
+            return False
+
+        logger.info(f"Metadata collection completed. {n_after_qc} samples after QC. Results saved to {metadata_file}")
         return True
     
     def step3_classify_samples(self, metadata_file):
@@ -197,10 +234,8 @@ class CancerAnalysisPipeline:
             logger.error("Pipeline failed at Step 1: Cancer type search")
             return False
         
-        srr_list_file = self.cancer_type_dir / "metadata" / f"{self.cancer_type.replace(' ', '_')}_srr_list.txt"
-        
-        # Step 2: Collect metadata
-        if not self.step2_collect_metadata(srr_list_file):
+        # Step 2: Collect metadata via cohort builder
+        if not self.step2_collect_metadata(max_results):
             logger.error("Pipeline failed at Step 2: Metadata collection")
             return False
         
