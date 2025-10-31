@@ -10,6 +10,7 @@ import sys
 import subprocess
 import logging
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import re
 from pathlib import Path
@@ -29,13 +30,14 @@ logger = logging.getLogger(__name__)
 class SRAWorkflow:
     """Handles SRA download and FASTQ conversion workflow"""
     
-    def __init__(self, cancer_dir, no_wait: bool = False, poll_interval_sec: int = 60):
+    def __init__(self, cancer_dir, no_wait: bool = False, poll_interval_sec: int = 60, prefetch_workers: int = 16):
         self.cancer_dir = Path(cancer_dir)
         self.sample_list_path = self.cancer_dir / "sample_list.txt"
         self.logs_dir = self.cancer_dir / "logs"
         self.samples = {}  # Will store sample_id -> {srr_ids: [...], status: ...}
         self.no_wait = no_wait
         self.poll_interval_sec = poll_interval_sec
+        self.prefetch_workers = max(1, int(prefetch_workers or 1))
         self.submitted_jobs = {}  # srr_id -> job_id
         self.job_poll_cycles = {}  # srr_id -> number of poll cycles observed
         # Minimal color support
@@ -88,21 +90,41 @@ class SRAWorkflow:
         logger.info(f"Found {len(self.samples)} samples")
 
     def _sample_has_bam(self, sample_id: str) -> bool:
-        """Return True if a BAM for this sample exists (sample_id*.bam).
+        """Return True if a BAM for this sample exists.
 
-        Checks both the cancer directory root and an optional 'bams/' subdirectory.
+        Robust matching across both directory root and optional 'bams/' subdir:
+        - Filenames starting with sample_id (legacy convention)
+        - OR filenames containing any SRR/ERR ID for this sample
         """
         try:
-            # Check root
-            for p in self.cancer_dir.glob(f"{sample_id}*.bam"):
-                if p.is_file() and p.stat().st_size > 0:
-                    return True
-            # Check bams/ subdir
-            bams_dir = self.cancer_dir / "bams"
-            if bams_dir.is_dir():
-                for p in bams_dir.glob(f"{sample_id}*.bam"):
-                    if p.is_file() and p.stat().st_size > 0:
-                        return True
+            srr_ids = []
+            try:
+                srr_ids = self.samples.get(sample_id, {}).get('srr_ids', [])
+            except Exception:
+                srr_ids = []
+
+            def _dir_has_bam(d: Path) -> bool:
+                for p in d.glob('*.bam'):
+                    try:
+                        if not (p.is_file() and p.stat().st_size > 0):
+                            continue
+                        name = p.name
+                        if name.startswith(sample_id):
+                            return True
+                        for sid in srr_ids:
+                            if sid in name:
+                                return True
+                    except Exception:
+                        continue
+                return False
+
+            # Root directory
+            if _dir_has_bam(self.cancer_dir):
+                return True
+            # bams/ subdirectory
+            bams_dir = self.cancer_dir / 'bams'
+            if bams_dir.is_dir() and _dir_has_bam(bams_dir):
+                return True
         except Exception:
             pass
         return False
@@ -155,14 +177,24 @@ class SRAWorkflow:
         logger.info(self._c("STEP 1: Download SRA files (if needed)", self._C_CYAN))
         logger.info("=" * 50)
         
+        tasks = []
         for sample_id, sample_data in self.samples.items():
             # Skip entire sample if BAM already exists
             if self._sample_has_bam(sample_id):
                 logger.info(self._c(f"✓ {sample_id}: BAM exists; skipping SRA downloads for all SRRs", self._C_GREEN))
                 continue
-            # Download each SRR file for this sample
             for srr_id in sample_data['srr_ids']:
-                self._download_single_sra(srr_id, sample_id)
+                tasks.append((srr_id, sample_id))
+
+        if not tasks:
+            logger.info(self._c("No SRA downloads needed.", self._C_CYAN))
+            return
+
+        logger.info(self._c(f"Starting parallel prefetch with {self.prefetch_workers} workers ({len(tasks)} SRRs)", self._C_CYAN))
+        with ThreadPoolExecutor(max_workers=self.prefetch_workers) as pool:
+            futures = [pool.submit(self._download_single_sra, srr_id, sample_id) for srr_id, sample_id in tasks]
+            for _ in as_completed(futures):
+                pass
     
     def _download_single_sra(self, srr_id, sample_id):
         """Download a single SRA file using prefetch"""
@@ -538,8 +570,8 @@ class SRAWorkflow:
                     else:
                         any_missing_both = True
 
-            # 2) BAM_DONE (only if all fastqs are good AND bam exists)
-            if status is None and all_fastqs_ok:
+            # 2) BAM_DONE (bam exists regardless of FASTQ presence)
+            if status is None:
                 if self._sample_has_bam(sample_id):
                     status = 'BAM_DONE'
 
@@ -633,6 +665,7 @@ def main():
     )
     parser.add_argument('cancer_directory', help='Path to cancer directory containing sample_list.txt')
     parser.add_argument('--no-wait', action='store_true', help='Do not wait for conversion jobs; submit and exit')
+    parser.add_argument('--prefetch-workers', type=int, default=16, help='Number of parallel workers for SRA prefetch (default: 16)')
     
     args = parser.parse_args()
     
@@ -642,7 +675,7 @@ def main():
         sys.exit(1)
     
     # Run workflow
-    workflow = SRAWorkflow(args.cancer_directory, no_wait=args.no_wait)
+    workflow = SRAWorkflow(args.cancer_directory, no_wait=args.no_wait, prefetch_workers=args.prefetch_workers)
     workflow.run()
 
 
