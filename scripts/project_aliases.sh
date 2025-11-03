@@ -22,13 +22,13 @@ sra-summary() {
 
 
 srr_to_geo() {
-  # Build sample_list.txt under POSEIDON, then optionally merge with user sheet and save into CWD
+  # Build sample_list.txt under POSEIDON. Conditional copy/merge based on input type.
   # Usage:
-  #   srr-to-geo <metadata_file> [sample_sheet.txt [more_sheets...]]
+  #   srr-to-geo <metadata_or_base_sample_list> [extra_sheet_or_table ...]
   # Behavior:
-  #   - Runs generator in ${POSEIDON_DIR}
-  #   - Copies generated sample_list.txt into the caller directory
-  #   - If one or more extra sheets are provided, produces sample_list.merged.txt in caller directory
+  #   - Excel (.xlsx/.xls): generate per-sheet sample_list.txt under POSEIDON/<Sheet>/<CancerType>/; do NOT copy to CWD; skip merge.
+  #   - CSV/TXT metadata (.csv or SRR list .txt): also copy generated sample_list.txt into CWD; if extras provided, write sample_list.merged.txt in CWD.
+  #   - Merge-only mode: if first arg is an existing sample_list.txt, skip generator and merge extras into CWD/sample_list.merged.txt.
   local prev_dir input_arg abs_input
   prev_dir="$(pwd)"
   input_arg="$1"
@@ -51,41 +51,62 @@ srr_to_geo() {
     fi
   fi
 
-  cd "${POSEIDON_DIR}" || { echo "Failed to cd to ${POSEIDON_DIR}" >&2; return 1; }
-
-  # Run generator and capture its stdout to detect where it wrote the file
-  local tmp_log rc
-  tmp_log="$(mktemp)"
-  if [ -n "$abs_input" ]; then
-    python3 "${POSEIDON_PROJECT_ROOT}/scripts/manual_pipeline/generate_geo_sample_lists.py" "$abs_input" | tee "$tmp_log"
-    rc=${PIPESTATUS[0]}
-  else
-    python3 "${POSEIDON_PROJECT_ROOT}/scripts/manual_pipeline/generate_geo_sample_lists.py" | tee "$tmp_log"
-    rc=${PIPESTATUS[0]}
+  # Determine input kind and whether we are in merge-only mode
+  local input_kind="unknown" merge_only=0
+  if [ -n "$abs_input" ] && [ -f "$abs_input" ]; then
+    case "$abs_input" in
+      *.xlsx|*.xls) input_kind="excel" ;;
+      *.csv)        input_kind="csv" ;;
+      *.txt)        input_kind="txt" ;;
+      *)            input_kind="unknown" ;;
+    esac
+    if [ "$(basename "$abs_input")" = "sample_list.txt" ]; then
+      merge_only=1
+    fi
   fi
 
-  # Try to parse the output path from the generator message
-  local wrote_path
-  wrote_path="$(awk -F': ' '/^Wrote .* to: /{print $2}' "$tmp_log" | tail -n 1)"
-  rm -f "$tmp_log"
+  local rc wrote_path
+  if [ "${merge_only}" -eq 1 ]; then
+    # Skip generator; we'll only perform a merge using the provided base sample_list.txt
+    rc=0
+    wrote_path=""
+  else
+    cd "${POSEIDON_DIR}" || { echo "Failed to cd to ${POSEIDON_DIR}" >&2; return 1; }
+    # Run generator and capture its stdout to detect where it wrote the file
+    local tmp_log
+    tmp_log="$(mktemp)"
+    if [ -n "$abs_input" ]; then
+      python3 "${POSEIDON_PROJECT_ROOT}/scripts/manual_pipeline/generate_geo_sample_lists.py" "$abs_input" | tee "$tmp_log"
+      rc=${PIPESTATUS[0]}
+    else
+      python3 "${POSEIDON_PROJECT_ROOT}/scripts/manual_pipeline/generate_geo_sample_lists.py" | tee "$tmp_log"
+      rc=${PIPESTATUS[0]}
+    fi
+    # Try to parse the output path from the generator message (single-output modes)
+    wrote_path="$(awk -F': ' '/^Wrote .* to: /{print $2}' "$tmp_log" | tail -n 1)"
+    rm -f "$tmp_log"
+  fi
 
   # Only copy when generator succeeded
   if [ ${rc:-0} -eq 0 ]; then
-    # Fallback: pick the most recent sample_list.txt under SRR/
+    # Fallback: pick the most recent sample_list.txt under SRR/ (only relevant for SRR mode)
     if [ -z "$wrote_path" ] || [ ! -f "$wrote_path" ]; then
       wrote_path="$(ls -t "${POSEIDON_DIR}/SRR"/*/sample_list.txt 2>/dev/null | head -n 1)"
     fi
-    # Copy generated file into the caller directory as sample_list.txt
-    if [ -n "$wrote_path" ] && [ -f "$wrote_path" ]; then
-      cp -f "$wrote_path" "${prev_dir}/sample_list.txt"
-      echo "Copied generated sample list to: ${prev_dir}/sample_list.txt"
-    else
-      echo "Warning: Could not locate generated sample_list.txt" >&2
+    # Copy into CWD only for CSV/TXT inputs (quick-iteration modes)
+    if [ "${merge_only}" -ne 1 ] && { [ "${input_kind}" = "csv" ] || [ "${input_kind}" = "txt" ]; }; then
+      if [ -n "$wrote_path" ] && [ -f "$wrote_path" ]; then
+        cp -f "$wrote_path" "${prev_dir}/sample_list.txt"
+        echo "Copied generated sample list to: ${prev_dir}/sample_list.txt"
+      else
+        echo "Warning: Could not locate generated sample_list.txt" >&2
+      fi
     fi
   fi
 
   # If extra sheets were provided, merge them into a new file in caller directory
-  if [ ${#extra_sheets[@]} -gt 0 ]; then
+  # Allowed when: merge-only mode OR input was CSV/TXT. Skipped for Excel inputs.
+  if [ ${#extra_sheets[@]} -gt 0 ] && { [ "${merge_only}" -eq 1 ] || [ "${input_kind}" = "csv" ] || [ "${input_kind}" = "txt" ]; }; then
     # If generator failed, proceed if caller already has a sample_list.txt
     if [ ${rc:-0} -ne 0 ]; then
       if [ -f "${prev_dir}/sample_list.txt" ]; then
@@ -106,13 +127,22 @@ srr_to_geo() {
       fi
     done
 
+    # Determine base for merge: merge-only uses provided sample_list.txt; otherwise use the CWD copy
+    local base_for_merge out_merge
+    if [ "${merge_only}" -eq 1 ]; then
+      base_for_merge="$abs_input"
+    else
+      base_for_merge="${prev_dir}/sample_list.txt"
+    fi
+    out_merge="${prev_dir}/sample_list.merged.txt"
+
     # Keep a copy of the raw file alongside
-    if [ -f "${prev_dir}/sample_list.txt" ]; then
-      cp -f "${prev_dir}/sample_list.txt" "${prev_dir}/sample_list.raw.txt"
+    if [ -f "${base_for_merge}" ]; then
+      cp -f "${base_for_merge}" "${prev_dir}/sample_list.raw.txt"
     fi
 
     # Merge into sample_list.merged.txt (do not overwrite the 3-col file by default)
-    python3 - "$prev_dir/sample_list.txt" "$prev_dir/sample_list.merged.txt" "${resolved_extras[@]}" <<'PY'
+    python3 - "$base_for_merge" "$out_merge" "${resolved_extras[@]}" <<'PY'
 import sys, os, csv, re
 from collections import OrderedDict, defaultdict
 
@@ -413,13 +443,17 @@ Project commands (source scripts/project_aliases.sh first):
   Run from: anywhere (wrapper resolves paths)
   Example: sra-summary
 
-- srr-to-geo <metadata_file> [sample_sheet [more_sheets...]]
-  Description: Create sample_list.txt under POSEIDON and copy it to CWD. If sheet(s) are provided, also write sample_list.merged.txt in CWD by unioning columns without data loss.
+- srr-to-geo <metadata_or_base_sample_list> [extra_sheet ...]
+  Description:
+    - Excel (.xlsx/.xls): write per-sheet sample_list.txt under POSEIDON/<Sheet>/<CancerType>/; no CWD files and no auto-merge.
+    - CSV/TXT: also copy generated sample_list.txt to CWD; if extras provided, write sample_list.merged.txt in CWD.
+    - Merge-only: if first arg is an existing sample_list.txt, skip generation and merge extras into CWD/sample_list.merged.txt.
   Run from: anywhere; command cd's to /data/salomonis-archive/FASTQs/NCI-R01/POSEIDON as required.
   Examples:
-    srr-to-geo Tongue-SRA.txt
-    srr-to-geo Tongue-SRA.txt sample_sheet.txt
-    srr-to-geo Tongue-SRA.txt sheet1.csv sheet2.tsv
+    srr-to-geo Tongue-SRA.xlsx
+    srr-to-geo SRRs.txt
+    srr-to-geo SRRs.txt sample_sheet.txt
+    srr-to-geo /data/.../Controls/<CancerType>/sample_list.txt extra.csv
   HINT: Before running: conda activate sra-metadata
 
 - fastq-workflow <cancer_directory>
