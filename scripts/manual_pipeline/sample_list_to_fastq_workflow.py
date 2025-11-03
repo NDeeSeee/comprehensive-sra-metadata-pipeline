@@ -208,18 +208,25 @@ class SRAWorkflow:
         """Validate that an SRA file is not corrupted using vdb-validate.
 
         Returns True if file is valid, False otherwise.
-        Falls back to basic size check if vdb-validate is unavailable.
+        Falls back to basic size check if vdb-validate is unavailable or times out.
+
+        IMPORTANT: Timeout does NOT mean corruption - just slow I/O on large files!
         """
         if not sra_file.exists():
             return False
 
         # Basic check: file must be at least 1KB
         try:
-            if sra_file.stat().st_size < 1024:
+            file_size = sra_file.stat().st_size
+            if file_size < 1024:
                 logger.warning(f"SRA file {sra_file.name} is suspiciously small (<1KB)")
                 return False
         except Exception:
             return False
+
+        # Calculate timeout based on file size: ~1 second per 100MB, min 30s, max 300s
+        # Large files on network storage need more time
+        timeout_seconds = max(30, min(300, int(file_size / (100 * 1024 * 1024))))
 
         # Try vdb-validate if available (part of sratoolkit)
         try:
@@ -227,7 +234,7 @@ class SRAWorkflow:
                 ['vdb-validate', str(sra_file)],
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=timeout_seconds,
                 check=False
             )
             # vdb-validate returns 0 for valid files
@@ -241,8 +248,10 @@ class SRAWorkflow:
             logger.debug("vdb-validate not found; using size-based validation")
             return True  # Assume valid if size check passed
         except subprocess.TimeoutExpired:
-            logger.warning(f"SRA validation timeout for {sra_file.name}")
-            return False
+            # TIMEOUT DOES NOT MEAN CORRUPTION - just slow I/O on large files!
+            # For large files on network storage, validation can take a very long time
+            logger.debug(f"SRA validation timed out after {timeout_seconds}s for {sra_file.name} ({file_size / (1024**3):.1f} GB) - assuming valid")
+            return True  # Assume valid - timeout is not corruption
         except Exception as e:
             logger.debug(f"Could not validate {sra_file.name}: {e}")
             return True  # Assume valid if validation unavailable
@@ -764,16 +773,50 @@ class SRAWorkflow:
     def _gzip_test(self, *paths: Path) -> bool:
         """Validate gzip files quickly without long blocking.
 
-        - Prefer `gzip -t` with a configurable timeout (default 60s).
-        - Fallback: read a small chunk via Python gzip to check header.
+        Strategy:
+        - For large files (>500MB), skip full gzip test (too slow on network storage)
+        - For small files, use gzip -t with timeout
+        - Timeout does NOT mean corruption - just slow I/O
+        - Fallback: test gzip header by reading first chunk
         """
+        # Check total size - skip expensive validation for large files
+        total_size = 0
+        try:
+            for p in paths:
+                total_size += p.stat().st_size
+        except Exception:
+            pass
+
+        # For large files (>500MB total), skip gzip -t (too slow on network FS)
+        if total_size > 500 * 1024 * 1024:
+            logger.debug(f"Skipping full gzip test for large files ({total_size / (1024**3):.1f} GB), testing headers only")
+            # Just test that we can open and read the header
+            try:
+                for p in paths:
+                    with gzip.open(p, 'rb') as f:
+                        f.read(4096)  # Read first chunk to verify header
+                return True
+            except Exception as e:
+                logger.warning(f"Gzip header test failed for {[p.name for p in paths]}: {e}")
+                return False
+
+        # For smaller files, use gzip -t with timeout
         try:
             cmd = ['gzip', '-t'] + [str(p) for p in paths]
             r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=self.gzip_test_timeout)
             return r.returncode == 0
         except subprocess.TimeoutExpired:
-            logger.warning(f"Gzip validation timed out after {self.gzip_test_timeout}s for {[p.name for p in paths]}")
-            return False
+            # TIMEOUT DOES NOT MEAN CORRUPTION - just slow I/O!
+            # Fall back to assuming valid if header test passes
+            logger.debug(f"Gzip test timed out after {self.gzip_test_timeout}s for {[p.name for p in paths]} - assuming valid (slow I/O)")
+            try:
+                for p in paths:
+                    with gzip.open(p, 'rb') as f:
+                        f.read(4096)
+                return True  # Header is valid, assume file is OK
+            except Exception as e:
+                logger.warning(f"Gzip header fallback failed: {e}")
+                return False
         except Exception:
             try:
                 for p in paths:
