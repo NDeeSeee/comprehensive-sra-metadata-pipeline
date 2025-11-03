@@ -246,6 +246,103 @@ class SRAWorkflow:
         except Exception as e:
             logger.debug(f"Could not validate {sra_file.name}: {e}")
             return True  # Assume valid if validation unavailable
+
+    def _validate_fastq_pair(self, r1_path: Path, r2_path: Path, srr_id: str = None) -> tuple:
+        """Validate a pair of FASTQ files for completeness and correctness.
+
+        Returns (is_valid: bool, reason: str)
+
+        Checks performed:
+        1. Files exist and non-empty
+        2. Gzip integrity (not corrupted)
+        3. FASTQ format validity (proper 4-line records)
+        4. Both files have same number of reads (paired)
+        5. Files are not suspiciously small
+
+        This catches interrupted conversions from HPC shutdowns.
+        """
+        id_str = f"{srr_id}: " if srr_id else ""
+
+        # Check existence and size
+        for p, label in [(r1_path, 'R1'), (r2_path, 'R2')]:
+            if not p.exists():
+                return False, f"{id_str}{label} does not exist"
+            try:
+                size = p.stat().st_size
+                if size == 0:
+                    return False, f"{id_str}{label} is empty (0 bytes)"
+                if size < 100:  # Suspiciously small even for gzipped
+                    return False, f"{id_str}{label} is suspiciously small ({size} bytes)"
+            except OSError as e:
+                return False, f"{id_str}Cannot stat {label}: {e}"
+
+        # Check gzip integrity
+        if not self._gzip_test(r1_path, r2_path):
+            return False, f"{id_str}Gzip integrity check failed (corrupted or incomplete compression)"
+
+        # Check FASTQ format and read counts
+        try:
+            r1_reads = self._count_fastq_reads(r1_path)
+            r2_reads = self._count_fastq_reads(r2_path)
+
+            if r1_reads == 0 and r2_reads == 0:
+                return False, f"{id_str}Both files appear empty or invalid FASTQ format"
+            if r1_reads == 0:
+                return False, f"{id_str}R1 has no valid reads"
+            if r2_reads == 0:
+                return False, f"{id_str}R2 has no valid reads"
+            if r1_reads != r2_reads:
+                return False, f"{id_str}Read count mismatch: R1={r1_reads}, R2={r2_reads} (interrupted conversion)"
+
+            logger.debug(f"{id_str}Validated: {r1_reads} paired reads")
+            return True, f"Valid ({r1_reads} reads)"
+
+        except Exception as e:
+            return False, f"{id_str}FASTQ validation error: {e}"
+
+    def _count_fastq_reads(self, fastq_gz_path: Path, max_reads: int = 1000) -> int:
+        """Count reads in a gzipped FASTQ file (samples first N reads for speed).
+
+        Returns number of reads found, or 0 if format is invalid.
+        Validates FASTQ 4-line structure while counting.
+        """
+        try:
+            with gzip.open(fastq_gz_path, 'rt') as f:
+                read_count = 0
+                line_in_record = 0
+
+                for i, line in enumerate(f):
+                    if i >= max_reads * 4:  # Sample first N reads only
+                        break
+
+                    # Validate FASTQ 4-line structure
+                    if line_in_record == 0:  # Header line
+                        if not line.startswith('@'):
+                            logger.warning(f"Invalid FASTQ header at line {i+1} in {fastq_gz_path.name}")
+                            return 0
+                    elif line_in_record == 2:  # '+' separator line
+                        if not line.startswith('+'):
+                            logger.warning(f"Invalid FASTQ separator at line {i+1} in {fastq_gz_path.name}")
+                            return 0
+
+                    line_in_record += 1
+                    if line_in_record == 4:
+                        read_count += 1
+                        line_in_record = 0
+
+                # Check if file ended mid-record (truncated)
+                if line_in_record != 0:
+                    logger.warning(f"Truncated FASTQ record in {fastq_gz_path.name} (incomplete 4-line record)")
+                    return 0
+
+                return read_count if read_count > 0 else 0
+
+        except EOFError:
+            logger.warning(f"Unexpected EOF in {fastq_gz_path.name} (interrupted compression)")
+            return 0
+        except Exception as e:
+            logger.debug(f"Error counting reads in {fastq_gz_path.name}: {e}")
+            return 0
     
     def load_modules(self):
         """Load required modules (sratoolkit and aspera).
@@ -320,11 +417,23 @@ class SRAWorkflow:
         sra_file = self.cancer_dir / f"{srr_id}.sra"
         srr_r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
         srr_r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
-        
-        # Skip if SRR-level FASTQs already exist
+
+        # Skip if SRR-level FASTQs already exist AND are valid
         if srr_r1.exists() and srr_r2.exists():
-            logger.info(self._c(f"    ✓ {srr_id} FASTQs exist, skipping prefetch", self._C_GREEN))
-            return
+            is_valid, reason = self._validate_fastq_pair(srr_r1, srr_r2, srr_id)
+            if is_valid:
+                logger.info(self._c(f"    ✓ {srr_id} FASTQs exist and validated, skipping prefetch", self._C_GREEN))
+                return
+            else:
+                logger.warning(self._c(f"    ! {srr_id} FASTQs exist but invalid: {reason}", self._C_YELLOW))
+                logger.warning(self._c(f"    ! Removing invalid FASTQs and will reprocess", self._C_YELLOW))
+                # Remove invalid files so they can be regenerated
+                try:
+                    srr_r1.unlink()
+                    srr_r2.unlink()
+                except Exception as e:
+                    logger.warning(f"Could not remove invalid FASTQs: {e}")
+                # Continue to download/convert
         
         # Skip if SRA file already exists
         if sra_file.exists():
@@ -432,10 +541,22 @@ class SRAWorkflow:
                         continue
                 except (FileNotFoundError, OSError):
                     pass  # File doesn't exist or can't be read, continue normally
-                
+
+                # Check if FASTQs exist AND are valid (not corrupted/interrupted)
                 if srr_r1.exists() and srr_r2.exists():
-                    skipped_fastq += 1
-                    continue
+                    is_valid, reason = self._validate_fastq_pair(srr_r1, srr_r2, srr_id)
+                    if is_valid:
+                        skipped_fastq += 1
+                        continue
+                    else:
+                        logger.warning(self._c(f"  ! {srr_id} FASTQs exist but invalid: {reason}", self._C_YELLOW))
+                        logger.warning(self._c(f"  ! Will reconvert from SRA", self._C_YELLOW))
+                        # Remove invalid files and reconvert
+                        try:
+                            srr_r1.unlink()
+                            srr_r2.unlink()
+                        except Exception as e:
+                            logger.warning(f"Could not remove invalid FASTQs: {e}")
 
                 # If there is an active job from a previous run, do not resubmit
                 prev_job = self.submitted_jobs.get(srr_id)
@@ -657,29 +778,38 @@ class SRAWorkflow:
                 srr_r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
                 srr_r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
                 sra_file = self.cancer_dir / f"{srr_id}.sra"
-                if srr_r1.exists() and srr_r2.exists() and self._gzip_test(srr_r1, srr_r2):
-                    if sra_file.exists():
-                        with contextlib.suppress(Exception):
-                            sra_file.unlink()
-                            logger.info(self._c(f"  ✓ Cleaned {srr_id}.sra after successful conversion", self._C_GREEN))
-                    finished.append(srr_id)
-                    continue
+                if srr_r1.exists() and srr_r2.exists():
+                    is_valid, reason = self._validate_fastq_pair(srr_r1, srr_r2, srr_id)
+                    if is_valid:
+                        if sra_file.exists():
+                            with contextlib.suppress(Exception):
+                                sra_file.unlink()
+                                logger.info(self._c(f"  ✓ Cleaned {srr_id}.sra after successful conversion", self._C_GREEN))
+                        finished.append(srr_id)
+                        continue
+                    else:
+                        logger.warning(self._c(f"  ! {srr_id} FASTQs present but validation failed: {reason}", self._C_YELLOW))
 
                 status = self._bjobs_status(job_id)
                 # Treat common terminal/unknown states as finished
                 if status in ('DONE', 'EXIT', 'ZOMBIE', 'ZOMBI', 'UNKNOWN', 'UNKWN'):
                     # Check outputs regardless of status
-                    if srr_r1.exists() and srr_r2.exists() and self._gzip_test(srr_r1, srr_r2):
-                        if sra_file.exists():
-                            try:
-                                sra_file.unlink()
-                                logger.info(f"  ✓ Cleaned {srr_id}.sra after successful conversion")
-                            except Exception as e:
-                                logger.warning(f"  ! Could not remove {srr_id}.sra: {e}")
-                        finished.append(srr_id)
+                    if srr_r1.exists() and srr_r2.exists():
+                        is_valid, reason = self._validate_fastq_pair(srr_r1, srr_r2, srr_id)
+                        if is_valid:
+                            if sra_file.exists():
+                                try:
+                                    sra_file.unlink()
+                                    logger.info(f"  ✓ Cleaned {srr_id}.sra after successful conversion")
+                                except Exception as e:
+                                    logger.warning(f"  ! Could not remove {srr_id}.sra: {e}")
+                            finished.append(srr_id)
+                        else:
+                            logger.warning(self._c(f"  ! {srr_id} job {status} but FASTQs invalid: {reason}; keeping .sra", self._C_YELLOW))
+                            finished.append(srr_id)
                     else:
                         if status in ('DONE', 'EXIT'):
-                            logger.warning(self._c(f"  ! {srr_id} job {status} but FASTQs missing/invalid; keeping .sra", self._C_YELLOW))
+                            logger.warning(self._c(f"  ! {srr_id} job {status} but FASTQs missing; keeping .sra", self._C_YELLOW))
                         elif status in ('ZOMBIE', 'ZOMBI', 'UNKNOWN', 'UNKWN'):
                             logger.warning(self._c(f"  ! {srr_id} job {status}; FASTQs missing; treating as finished", self._C_YELLOW))
                         finished.append(srr_id)
@@ -747,10 +877,12 @@ class SRAWorkflow:
                 continue
             r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
             r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
-            if r1.exists() and r2.exists() and self._gzip_test(r1, r2):
-                with contextlib.suppress(Exception):
-                    sra_file.unlink()
-                    removed += 1
+            if r1.exists() and r2.exists():
+                is_valid, _ = self._validate_fastq_pair(r1, r2, srr_id)
+                if is_valid:
+                    with contextlib.suppress(Exception):
+                        sra_file.unlink()
+                        removed += 1
         if removed:
             logger.info(self._c(f"  ✓ Global cleanup removed {removed} converted .sra files", self._C_GREEN))
 
