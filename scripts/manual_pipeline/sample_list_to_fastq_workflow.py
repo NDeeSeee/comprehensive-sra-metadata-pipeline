@@ -435,10 +435,19 @@ class SRAWorkflow:
                     logger.warning(f"Could not remove invalid FASTQs: {e}")
                 # Continue to download/convert
         
-        # Skip if SRA file already exists
+        # Skip if SRA file already exists AND is valid
         if sra_file.exists():
-            logger.info(self._c(f"    ✓ {srr_id}.sra already exists", self._C_GREEN))
-            return
+            if self._validate_sra_file(sra_file):
+                logger.info(self._c(f"    ✓ {srr_id}.sra already exists and validated", self._C_GREEN))
+                return
+            else:
+                logger.warning(self._c(f"    ! {srr_id}.sra exists but invalid (corrupted/incomplete)", self._C_YELLOW))
+                logger.warning(self._c(f"    ! Removing invalid SRA and will re-download", self._C_YELLOW))
+                try:
+                    sra_file.unlink()
+                except Exception as e:
+                    logger.warning(f"Could not remove invalid SRA: {e}")
+                # Continue to re-download below
         
         # Download using prefetch
         logger.info(self._c(f"    → Downloading {srr_id}...", self._C_CYAN))
@@ -566,6 +575,12 @@ class SRAWorkflow:
                     continue
                 
                 if sra_file.exists():
+                    # Validate SRA before submitting conversion job
+                    if not self._validate_sra_file(sra_file):
+                        logger.warning(self._c(f"  ! {srr_id}.sra exists but is invalid/corrupted; skipping conversion", self._C_YELLOW))
+                        logger.warning(self._c(f"  ! Run script again to re-download this SRA", self._C_YELLOW))
+                        continue
+
                     logger.info(self._c(f"→ Submitting conversion job for {srr_id}.sra", self._C_CYAN))
                     try:
                         # Capture bsub output from submit_fastq_dump_jobs.sh to parse Job ID
