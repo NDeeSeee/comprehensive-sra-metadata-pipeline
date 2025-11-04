@@ -1007,10 +1007,16 @@ class SRAWorkflow:
     def cleanup_artifacts_for_completed_samples(self):
         """If a sample has a BAM, remove its SRR .sra and FASTQs to free space.
 
+        Validates FASTQs before deletion to provide audit trail of data integrity.
+        If corruption is detected, logs a warning (BAM may be compromised).
+        Deletion proceeds regardless to free space.
+
         This is more aggressive than conversion cleanup and runs after STEP 2.
         """
         total_sra_removed = 0
         total_fastq_removed = 0
+        corrupted_detected = []
+
         for sample_id, sample_data in self.samples.items():
             if not self._sample_has_bam(sample_id):
                 continue
@@ -1018,6 +1024,25 @@ class SRAWorkflow:
                 sra_file = self.cancer_dir / f"{srr_id}.sra"
                 r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
                 r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
+
+                # Validate FASTQs before cleanup if both exist (audit trail)
+                if r1.exists() and r2.exists():
+                    try:
+                        is_valid, reason = self._validate_fastq_pair(r1, r2, srr_id)
+                        if not is_valid:
+                            logger.warning(self._c(
+                                f"  ⚠ {sample_id}/{srr_id}: BAM exists but FASTQ corrupted: {reason}",
+                                self._C_YELLOW
+                            ))
+                            logger.warning(self._c(
+                                f"  ⚠ Consider re-validating {sample_id} BAM or re-running alignment",
+                                self._C_YELLOW
+                            ))
+                            corrupted_detected.append(srr_id)
+                    except Exception as e:
+                        logger.debug(f"FASTQ validation failed for {srr_id} (will delete anyway): {e}")
+
+                # Delete artifacts regardless of validation result
                 with contextlib.suppress(Exception):
                     if sra_file.exists():
                         sra_file.unlink()
@@ -1030,10 +1055,16 @@ class SRAWorkflow:
                     if r2.exists():
                         r2.unlink()
                         total_fastq_removed += 1
+
         if total_sra_removed or total_fastq_removed:
             logger.info(self._c(
                 f"  ✓ Final cleanup (BAM present): removed {total_sra_removed} .sra and {total_fastq_removed} FASTQ files",
                 self._C_GREEN
+            ))
+        if corrupted_detected:
+            logger.warning(self._c(
+                f"  ⚠ Detected {len(corrupted_detected)} corrupted FASTQ(s) for samples with BAMs: {', '.join(corrupted_detected[:5])}{'...' if len(corrupted_detected) > 5 else ''}",
+                self._C_YELLOW
             ))
 
     def cleanup_converted_sras_lightweight(self):
