@@ -801,44 +801,34 @@ class SRAWorkflow:
             _discover_with_long()
 
     def _gzip_test(self, *paths: Path) -> bool:
-        """Validate gzip files quickly without long blocking.
+        """Validate gzip files with full integrity check.
 
-        Strategy:
-        - For large files (>500MB), skip full gzip test (too slow on network storage)
-        - For small files, use gzip -t with timeout
-        - Timeout does NOT mean corruption - just slow I/O
-        - Fallback: test gzip header by reading first chunk
+        Uses gzip -t to decompress entire file and verify integrity.
+        This is the ONLY way to catch truncated files from cluster shutdowns.
+
+        Timeout protection prevents hangs on slow network storage.
+        IMPORTANT: Timeout does NOT mean corruption - just slow I/O.
         """
-        # Check total size - skip expensive validation for large files
+        # Calculate dynamic timeout based on file sizes
+        # ~1 second per 100MB, min 60s, max 300s (5 minutes)
         total_size = 0
         try:
             for p in paths:
                 total_size += p.stat().st_size
         except Exception:
-            pass
+            total_size = 1024 * 1024 * 1024  # Assume 1GB if stat fails
 
-        # For large files (>500MB total), skip gzip -t (too slow on network FS)
-        if total_size > 500 * 1024 * 1024:
-            logger.debug(f"Skipping full gzip test for large files ({total_size / (1024**3):.1f} GB), testing headers only")
-            # Just test that we can open and read the header
-            try:
-                for p in paths:
-                    with gzip.open(p, 'rb') as f:
-                        f.read(4096)  # Read first chunk to verify header
-                return True
-            except Exception as e:
-                logger.warning(f"Gzip header test failed for {[p.name for p in paths]}: {e}")
-                return False
+        timeout = max(60, min(300, int(total_size / (100 * 1024 * 1024))))
 
-        # For smaller files, use gzip -t with timeout
+        # Use gzip -t with dynamic timeout for full validation
         try:
             cmd = ['gzip', '-t'] + [str(p) for p in paths]
-            r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=self.gzip_test_timeout)
+            r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
             return r.returncode == 0
         except subprocess.TimeoutExpired:
             # TIMEOUT DOES NOT MEAN CORRUPTION - just slow I/O!
             # Fall back to assuming valid if header test passes
-            logger.debug(f"Gzip test timed out after {self.gzip_test_timeout}s for {[p.name for p in paths]} - assuming valid (slow I/O)")
+            logger.debug(f"Gzip test timed out after {timeout}s for {[p.name for p in paths]} ({total_size / (1024**3):.1f} GB) - assuming valid (slow I/O)")
             try:
                 for p in paths:
                     with gzip.open(p, 'rb') as f:
