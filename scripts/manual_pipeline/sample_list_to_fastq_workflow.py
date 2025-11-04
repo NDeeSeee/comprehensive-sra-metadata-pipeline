@@ -309,6 +309,40 @@ class SRAWorkflow:
         except Exception as e:
             return False, f"{id_str}FASTQ validation error: {e}"
 
+    def _cleanup_corrupted_fastqs(self, srr_id: str, reason: str = None) -> bool:
+        """Delete corrupted FASTQ files for a given SRR ID.
+
+        Always deletes corrupted FASTQs regardless of whether .sra exists.
+        Corrupted genomics data is dangerous and should be removed immediately.
+
+        Returns True if cleanup succeeded, False otherwise.
+        """
+        srr_r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
+        srr_r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
+
+        removed = []
+        try:
+            if srr_r1.exists():
+                srr_r1.unlink()
+                removed.append("R1")
+            if srr_r2.exists():
+                srr_r2.unlink()
+                removed.append("R2")
+
+            if removed:
+                files_str = " and ".join(removed)
+                reason_str = f" ({reason})" if reason else ""
+                logger.info(self._c(
+                    f"  ✓ Removed corrupted {files_str} for {srr_id}{reason_str}; keeping .sra for retry",
+                    self._C_GREEN
+                ))
+                return True
+            return False
+
+        except Exception as e:
+            logger.warning(self._c(f"  ! Could not remove corrupted FASTQs for {srr_id}: {e}", self._C_YELLOW))
+            return False
+
     def _count_fastq_reads(self, fastq_gz_path: Path, max_reads: int = 1000) -> int:
         """Count reads in a gzipped FASTQ file (samples first N reads for speed).
 
@@ -569,12 +603,8 @@ class SRAWorkflow:
                     else:
                         logger.warning(self._c(f"  ! {srr_id} FASTQs exist but invalid: {reason}", self._C_YELLOW))
                         logger.warning(self._c(f"  ! Will reconvert from SRA", self._C_YELLOW))
-                        # Remove invalid files and reconvert
-                        try:
-                            srr_r1.unlink()
-                            srr_r2.unlink()
-                        except Exception as e:
-                            logger.warning(f"Could not remove invalid FASTQs: {e}")
+                        # Remove invalid files - this ensures bash script can proceed with clean slate
+                        self._cleanup_corrupted_fastqs(srr_id, reason)
 
                 # If there is an active job from a previous run, do not resubmit
                 prev_job = self.submitted_jobs.get(srr_id)
@@ -847,6 +877,8 @@ class SRAWorkflow:
                         continue
                     else:
                         logger.warning(self._c(f"  ! {srr_id} FASTQs present but validation failed: {reason}", self._C_YELLOW))
+                        # Auto-cleanup corrupted files to enable retry on next run
+                        self._cleanup_corrupted_fastqs(srr_id, reason)
 
                 status = self._bjobs_status(job_id)
                 # Treat common terminal/unknown states as finished
@@ -864,6 +896,8 @@ class SRAWorkflow:
                             finished.append(srr_id)
                         else:
                             logger.warning(self._c(f"  ! {srr_id} job {status} but FASTQs invalid: {reason}; keeping .sra", self._C_YELLOW))
+                            # Auto-cleanup corrupted files to enable retry on next run
+                            self._cleanup_corrupted_fastqs(srr_id, reason)
                             finished.append(srr_id)
                     else:
                         if status in ('DONE', 'EXIT'):
@@ -922,7 +956,33 @@ class SRAWorkflow:
         Use this when:
         - After conversion jobs finish
         - When you need to ensure FASTQs are not corrupted before removing source data
+
+        SAFETY: Checks for active fastq-dump processes before cleanup to prevent
+        race conditions and .nfs ghost files.
         """
+        # Check for active fastq-dump processes to prevent race conditions
+        try:
+            result = subprocess.run(
+                ['pgrep', '-f', 'fastq-dump'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                # Active fastq-dump processes found
+                active_pids = result.stdout.strip().split('\n')
+                logger.warning(self._c(
+                    f"  ⚠ Skipping global cleanup: {len(active_pids)} active fastq-dump process(es) detected",
+                    self._C_YELLOW
+                ))
+                return
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            # pgrep not available or timeout - proceed cautiously with cleanup
+            logger.warning(self._c(
+                f"  ⚠ Could not check for active fastq-dump processes: {e}",
+                self._C_YELLOW
+            ))
+
         # Build unique SRR list from samples
         srr_ids = set()
         for s in self.samples.values():
@@ -987,7 +1047,33 @@ class SRAWorkflow:
         - Pre-run cleanup of files from previous runs
         - No conversions happened in current run
         - Speed is more important than verification (e.g., files already validated before)
+
+        SAFETY: Checks for active fastq-dump processes before cleanup to prevent
+        race conditions and .nfs ghost files.
         """
+        # Check for active fastq-dump processes to prevent race conditions
+        try:
+            result = subprocess.run(
+                ['pgrep', '-f', 'fastq-dump'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                # Active fastq-dump processes found
+                active_pids = result.stdout.strip().split('\n')
+                logger.warning(self._c(
+                    f"  ⚠ Skipping lightweight cleanup: {len(active_pids)} active fastq-dump process(es) detected",
+                    self._C_YELLOW
+                ))
+                return
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            # pgrep not available or timeout - proceed cautiously with cleanup
+            logger.warning(self._c(
+                f"  ⚠ Could not check for active fastq-dump processes: {e}",
+                self._C_YELLOW
+            ))
+
         srr_ids = set()
         for s in self.samples.values():
             for sid in s['srr_ids']:

@@ -35,10 +35,24 @@ if [ "$INPUT" = "sample_list.txt" ] || [ "$(basename "$INPUT")" = "sample_list.t
     
     # Process each SRR ID
     for SRR_ID in $SRR_IDS; do
-        # Check if FASTQ files already exist
+        # Check if FASTQ files already exist AND pass quick validation
         if [ -f "${SRR_ID}_1.fastq.gz" ] && [ -f "${SRR_ID}_2.fastq.gz" ]; then
-            echo "✓ ${SRR_ID} FASTQ files already exist, skipping"
-            continue
+            # Quick validation: check file size > 0 and not recently modified (finished writing)
+            # Files modified >2 min ago are considered stable/complete
+            if [ -s "${SRR_ID}_1.fastq.gz" ] && [ -s "${SRR_ID}_2.fastq.gz" ]; then
+                R1_RECENT=$(find "${SRR_ID}_1.fastq.gz" -mmin -2 2>/dev/null)
+                R2_RECENT=$(find "${SRR_ID}_2.fastq.gz" -mmin -2 2>/dev/null)
+                if [ -z "$R1_RECENT" ] && [ -z "$R2_RECENT" ]; then
+                    echo "✓ ${SRR_ID} FASTQ files already exist (stable), skipping"
+                    continue
+                else
+                    echo "⚠ ${SRR_ID} FASTQ files recently modified (possibly incomplete); will re-convert"
+                    rm -f "${SRR_ID}_1.fastq.gz" "${SRR_ID}_2.fastq.gz"
+                fi
+            else
+                echo "⚠ ${SRR_ID} FASTQ files exist but empty; will re-convert"
+                rm -f "${SRR_ID}_1.fastq.gz" "${SRR_ID}_2.fastq.gz"
+            fi
         fi
         
         # Check if SRA file exists
@@ -55,24 +69,29 @@ if [ "$INPUT" = "sample_list.txt" ] || [ "$(basename "$INPUT")" = "sample_list.t
 #BSUB -W 10:00
 #BSUB -n 1
 #BSUB -M 32000
-#BSUB -e $DIR/logs/${SRR_ID}_fastqdump.err.txt
-#BSUB -o $DIR/logs/${SRR_ID}_fastqdump.out.txt
+#BSUB -e "$DIR/logs/${SRR_ID}_fastqdump.err.txt"
+#BSUB -o "$DIR/logs/${SRR_ID}_fastqdump.out.txt"
 #BSUB -J fastq_${SRR_ID}
 
 mkdir -p logs
 
 module load sratoolkit/2.10.4
-module load aspera/3.9.1 
 
-cd $DIR
+cd "$DIR"
 
 fastq-dump --split-files ${SRR_ID}.sra --origfmt --gzip -O .
+FASTQ_DUMP_EXIT=\$?
 
-# If conversion succeeded and produced both FASTQs, remove the source .sra
-if [ -s "${SRR_ID}_1.fastq.gz" ] && [ -s "${SRR_ID}_2.fastq.gz" ]; then
-    rm -f "${SRR_ID}.sra"
+# Only cleanup if fastq-dump succeeded AND both FASTQs exist with content
+if [ \$FASTQ_DUMP_EXIT -eq 0 ]; then
+    if [ -s "${SRR_ID}_1.fastq.gz" ] && [ -s "${SRR_ID}_2.fastq.gz" ]; then
+        rm -f "${SRR_ID}.sra"
+        echo "✓ FASTQ conversion succeeded; removed ${SRR_ID}.sra"
+    else
+        echo "FASTQ conversion succeeded but output files incomplete for ${SRR_ID}; retaining .sra" 1>&2
+    fi
 else
-    echo "FASTQ conversion incomplete or failed for ${SRR_ID}; retaining .sra" 1>&2
+    echo "FASTQ conversion failed (exit \$FASTQ_DUMP_EXIT) for ${SRR_ID}; retaining .sra" 1>&2
 fi
 
 EOF
@@ -85,13 +104,27 @@ EOF
     
 else
     # Single SRA file processing (original functionality)
-    INPUTFILE=$1
-    SAMPLE=$(basename $INPUTFILE .sra)
-    
-    # Check if FASTQ files already exist
+    INPUTFILE="$1"
+    SAMPLE=$(basename "$INPUTFILE" .sra)
+
+    # Check if FASTQ files already exist AND pass quick validation
     if [ -f "${SAMPLE}_1.fastq.gz" ] && [ -f "${SAMPLE}_2.fastq.gz" ]; then
-        echo "✓ ${SAMPLE} FASTQ files already exist, skipping"
-        exit 0
+        # Quick validation: check file size > 0 and not recently modified (finished writing)
+        # Files modified >2 min ago are considered stable/complete
+        if [ -s "${SAMPLE}_1.fastq.gz" ] && [ -s "${SAMPLE}_2.fastq.gz" ]; then
+            R1_RECENT=$(find "${SAMPLE}_1.fastq.gz" -mmin -2 2>/dev/null)
+            R2_RECENT=$(find "${SAMPLE}_2.fastq.gz" -mmin -2 2>/dev/null)
+            if [ -z "$R1_RECENT" ] && [ -z "$R2_RECENT" ]; then
+                echo "✓ ${SAMPLE} FASTQ files already exist (stable), skipping"
+                exit 0
+            else
+                echo "⚠ ${SAMPLE} FASTQ files recently modified (possibly incomplete); will re-convert"
+                rm -f "${SAMPLE}_1.fastq.gz" "${SAMPLE}_2.fastq.gz"
+            fi
+        else
+            echo "⚠ ${SAMPLE} FASTQ files exist but empty; will re-convert"
+            rm -f "${SAMPLE}_1.fastq.gz" "${SAMPLE}_2.fastq.gz"
+        fi
     fi
     
     bsub <<EOF
@@ -99,24 +132,29 @@ else
 #BSUB -W 10:00
 #BSUB -n 1
 #BSUB -M 32000
-#BSUB -e $DIR/logs/${SAMPLE}_fastqdump.err.txt
-#BSUB -o $DIR/logs/${SAMPLE}_fastqdump.out.txt
+#BSUB -e "$DIR/logs/${SAMPLE}_fastqdump.err.txt"
+#BSUB -o "$DIR/logs/${SAMPLE}_fastqdump.out.txt"
 #BSUB -J fastq_${SAMPLE}
 
 mkdir -p logs
 
 module load sratoolkit/2.10.4
-module load aspera/3.9.1 
 
-cd $DIR
+cd "$DIR"
 
-fastq-dump --split-files $INPUTFILE --origfmt --gzip -O .
+fastq-dump --split-files "$INPUTFILE" --origfmt --gzip -O .
+FASTQ_DUMP_EXIT=\$?
 
-# If conversion succeeded and produced both FASTQs, remove the source .sra
-if [ -s "${SAMPLE}_1.fastq.gz" ] && [ -s "${SAMPLE}_2.fastq.gz" ]; then
-    rm -f "${SAMPLE}.sra"
+# Only cleanup if fastq-dump succeeded AND both FASTQs exist with content
+if [ \$FASTQ_DUMP_EXIT -eq 0 ]; then
+    if [ -s "${SAMPLE}_1.fastq.gz" ] && [ -s "${SAMPLE}_2.fastq.gz" ]; then
+        rm -f "${SAMPLE}.sra"
+        echo "✓ FASTQ conversion succeeded; removed ${SAMPLE}.sra"
+    else
+        echo "FASTQ conversion succeeded but output files incomplete for ${SAMPLE}; retaining .sra" 1>&2
+    fi
 else
-    echo "FASTQ conversion incomplete or failed for ${SAMPLE}; retaining .sra" 1>&2
+    echo "FASTQ conversion failed (exit \$FASTQ_DUMP_EXIT) for ${SAMPLE}; retaining .sra" 1>&2
 fi
 
 EOF
