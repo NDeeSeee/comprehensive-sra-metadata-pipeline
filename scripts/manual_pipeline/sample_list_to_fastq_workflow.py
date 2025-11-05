@@ -257,25 +257,66 @@ class SRAWorkflow:
             return True  # Assume valid if validation unavailable
 
     def _validate_fastq_pair(self, r1_path: Path, r2_path: Path, srr_id: str = None) -> tuple:
-        """Validate a pair of FASTQ files for completeness and correctness.
+        """Validate FASTQ files (paired-end or single-end) for completeness and correctness.
 
         Returns (is_valid: bool, reason: str)
+
+        Handles both layouts:
+        - Paired-end: Both R1 and R2 exist
+        - Single-end: Only R1 exists (R2 missing is OK, warns user)
 
         Checks performed:
         1. Files exist and non-empty
         2. Gzip integrity (not corrupted)
         3. FASTQ format validity (proper 4-line records)
-        4. Both files have same number of reads (paired)
+        4. Read count match (for paired-end only)
         5. Files are not suspiciously small
 
         This catches interrupted conversions from HPC shutdowns.
         """
         id_str = f"{srr_id}: " if srr_id else ""
 
+        # Detect layout: single-end or paired-end
+        r1_exists = r1_path.exists()
+        r2_exists = r2_path.exists()
+
+        if not r1_exists and not r2_exists:
+            return False, f"{id_str}No FASTQ files found (neither R1 nor R2)"
+
+        if not r1_exists:
+            return False, f"{id_str}R1 does not exist (R2 exists - unusual layout)"
+
+        # Single-end: only R1 exists
+        if not r2_exists:
+            logger.debug(f"{id_str}Detected single-end layout (only R1 present)")
+            # Validate R1 only
+            try:
+                size = r1_path.stat().st_size
+                if size == 0:
+                    return False, f"{id_str}R1 is empty (0 bytes)"
+                if size < 100:
+                    return False, f"{id_str}R1 is suspiciously small ({size} bytes)"
+            except OSError as e:
+                return False, f"{id_str}Cannot stat R1: {e}"
+
+            # Check gzip integrity
+            if not self._gzip_test(r1_path):
+                return False, f"{id_str}Gzip integrity check failed (corrupted or incomplete compression)"
+
+            # Check FASTQ format
+            try:
+                r1_reads = self._count_fastq_reads(r1_path)
+                if r1_reads == 0:
+                    return False, f"{id_str}R1 has no valid reads"
+
+                logger.info(self._c(f"  ℹ {srr_id}: Single-end layout validated ({r1_reads} reads)", self._C_CYAN))
+                return True, f"Valid single-end ({r1_reads} reads)"
+            except Exception as e:
+                return False, f"{id_str}FASTQ validation error: {e}"
+
+        # Paired-end: both R1 and R2 exist
         # Check existence and size
         for p, label in [(r1_path, 'R1'), (r2_path, 'R2')]:
-            if not p.exists():
-                return False, f"{id_str}{label} does not exist"
             try:
                 size = p.stat().st_size
                 if size == 0:
@@ -461,8 +502,8 @@ class SRAWorkflow:
         srr_r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
         srr_r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
 
-        # Skip if SRR-level FASTQs already exist AND are valid
-        if srr_r1.exists() and srr_r2.exists():
+        # Skip if SRR-level FASTQs already exist AND are valid (handles both single-end and paired-end)
+        if srr_r1.exists():
             is_valid, reason = self._validate_fastq_pair(srr_r1, srr_r2, srr_id)
             if is_valid:
                 logger.info(self._c(f"    ✓ {srr_id} FASTQs exist and validated, skipping prefetch", self._C_GREEN))
@@ -595,7 +636,8 @@ class SRAWorkflow:
                     pass  # File doesn't exist or can't be read, continue normally
 
                 # Check if FASTQs exist AND are valid (not corrupted/interrupted)
-                if srr_r1.exists() and srr_r2.exists():
+                # Handle both paired-end (R1+R2) and single-end (R1 only)
+                if srr_r1.exists():
                     is_valid, reason = self._validate_fastq_pair(srr_r1, srr_r2, srr_id)
                     if is_valid:
                         skipped_fastq += 1
@@ -856,7 +898,8 @@ class SRAWorkflow:
                 srr_r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
                 srr_r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
                 sra_file = self.cancer_dir / f"{srr_id}.sra"
-                if srr_r1.exists() and srr_r2.exists():
+                # Handle both single-end and paired-end layouts
+                if srr_r1.exists():
                     is_valid, reason = self._validate_fastq_pair(srr_r1, srr_r2, srr_id)
                     if is_valid:
                         if sra_file.exists():
@@ -873,8 +916,8 @@ class SRAWorkflow:
                 status = self._bjobs_status(job_id)
                 # Treat common terminal/unknown states as finished
                 if status in ('DONE', 'EXIT', 'ZOMBIE', 'ZOMBI', 'UNKNOWN', 'UNKWN'):
-                    # Check outputs regardless of status
-                    if srr_r1.exists() and srr_r2.exists():
+                    # Check outputs regardless of status (handles both single-end and paired-end)
+                    if srr_r1.exists():
                         is_valid, reason = self._validate_fastq_pair(srr_r1, srr_r2, srr_id)
                         if is_valid:
                             if sra_file.exists():
@@ -937,7 +980,7 @@ class SRAWorkflow:
                     pass
 
     def cleanup_converted_sras_global(self):
-        """Delete .sra files when both paired FASTQs exist and pass gzip integrity validation.
+        """Delete .sra files when FASTQs exist and pass gzip integrity validation (handles both single-end and paired-end).
 
         This is the THOROUGH cleanup method - validates gzip integrity before removal.
         Used after actual conversion jobs complete to ensure FASTQs are fully valid.
@@ -985,7 +1028,8 @@ class SRAWorkflow:
                 continue
             r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
             r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
-            if r1.exists() and r2.exists():
+            # Handle both single-end and paired-end layouts
+            if r1.exists():
                 is_valid, _ = self._validate_fastq_pair(r1, r2, srr_id)
                 if is_valid:
                     with contextlib.suppress(Exception):
@@ -1015,8 +1059,8 @@ class SRAWorkflow:
                 r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
                 r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
 
-                # Validate FASTQs before cleanup if both exist (audit trail)
-                if r1.exists() and r2.exists():
+                # Validate FASTQs before cleanup (audit trail, handles single-end and paired-end)
+                if r1.exists():
                     try:
                         is_valid, reason = self._validate_fastq_pair(r1, r2, srr_id)
                         if not is_valid:
