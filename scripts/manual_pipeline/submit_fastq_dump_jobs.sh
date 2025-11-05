@@ -142,7 +142,9 @@ module load sratoolkit/2.10.4
 
 cd "$DIR"
 
-fastq-dump --split-files "$INPUTFILE" --origfmt --gzip -O .
+# Use basename only since we cd'd into the directory
+# This avoids fastq-dump URL-decoding issues with special chars like '+'
+fastq-dump --split-files "${SAMPLE}.sra" --origfmt --gzip -O .
 FASTQ_DUMP_EXIT=\$?
 
 # Only cleanup if fastq-dump succeeded AND both FASTQs exist with content
