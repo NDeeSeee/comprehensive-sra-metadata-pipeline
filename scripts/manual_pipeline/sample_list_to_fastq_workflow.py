@@ -912,16 +912,24 @@ class SRAWorkflow:
             r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
             return r.returncode == 0
         except subprocess.TimeoutExpired:
-            # TIMEOUT DOES NOT MEAN CORRUPTION - just slow I/O on network storage!
-            # DO NOT fall back to header-only check - that defeats corruption detection.
-            # Assume valid and let user manually verify if needed.
+            # CRITICAL FIX: Timeout means we couldn't verify the file integrity.
+            # While timeout often indicates slow I/O on network storage, it could also mean:
+            # - Corrupted gzip causing infinite loop
+            # - Severely degraded network performance
+            # - File system issues
+            #
+            # CONSERVATIVE APPROACH: Return False to prevent SRA deletion until we can
+            # definitively verify the FASTQ is valid. Better to keep SRA longer (uses disk)
+            # than delete it and risk data loss if FASTQ is actually corrupted.
+            #
+            # SRA won't be deleted, and user can re-run validation later when I/O improves.
             logger.warning(self._c(
                 f"⚠ Gzip test timed out after {timeout}s for {[p.name for p in paths]} "
-                f"({total_size / (1024**3):.1f} GB) - assuming valid due to slow I/O. "
-                f"Manual verification recommended if issues persist.",
+                f"({total_size / (1024**3):.1f} GB). This could indicate slow I/O or corruption. "
+                f"Keeping .sra file until FASTQ can be verified. Re-run workflow to retry validation.",
                 self._C_YELLOW
             ))
-            return True  # Benefit of doubt for slow network filesystems
+            return False  # Conservative: don't delete SRA when validation is uncertain
         except FileNotFoundError:
             # gzip command not available - fall back to basic header check as last resort
             logger.warning(self._c(
