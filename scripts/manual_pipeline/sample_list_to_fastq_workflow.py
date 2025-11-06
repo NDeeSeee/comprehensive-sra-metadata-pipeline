@@ -171,12 +171,21 @@ class SRAWorkflow:
             logger.debug(f"Error checking BAM existence for {sample_id}: {e}")
         return False
 
-    def _has_star_progress_dirs(self, sample_id: str) -> bool:
-        """Return True if any STAR output/progress directories exist for this sample.
+    def _has_star_progress_dirs(self, sample_id: str) -> tuple:
+        """Check if STAR alignment is actively running (not just stale directories).
+
+        Returns:
+            Tuple of (has_active_alignment: bool, has_stale_dirs: bool)
+            - (True, False): Active STAR process with recent directories
+            - (False, True): Stale directories from old run, no active STAR
+            - (False, False): No STAR activity
 
         This detects work started by external STAR jobs, e.g. directories like:
         <sample_id>__STARpass1, <sample_id>__STARgenome, <sample_id>__STARtmp.
         """
+        import time
+
+        found_dirs = []
         try:
             for pattern in (
                 f"{sample_id}__STARpass1",
@@ -185,11 +194,53 @@ class SRAWorkflow:
             ):
                 for p in self.cancer_dir.glob(pattern):
                     if p.is_dir():
-                        # Consider as progress if directory exists (non-empty check optional)
-                        return True
+                        found_dirs.append(p)
         except OSError as e:
             logger.debug(f"Error checking STAR progress dirs for {sample_id}: {e}")
-        return False
+            return (False, False)
+
+        if not found_dirs:
+            return (False, False)
+
+        # Check if directories are recent (modified in last 2 hours)
+        current_time = time.time()
+        stale_threshold = 2 * 3600  # 2 hours in seconds
+        has_recent_dir = False
+
+        try:
+            for d in found_dirs:
+                mtime = d.stat().st_mtime
+                age_seconds = current_time - mtime
+                if age_seconds < stale_threshold:
+                    has_recent_dir = True
+                    break
+        except OSError:
+            pass
+
+        # Check for active STAR processes for this sample
+        has_active_star = False
+        try:
+            # Look for STAR processes with this sample_id in command line
+            result = subprocess.run(
+                ['pgrep', '-f', f'STAR.*{sample_id}'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                has_active_star = True
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            # pgrep not available or timeout, rely only on directory age
+            pass
+        except Exception:
+            pass
+
+        # Active if: (recent directories OR active process)
+        # Stale if: (old directories AND no active process)
+        is_active = has_recent_dir or has_active_star
+        is_stale = (not is_active) and len(found_dirs) > 0
+
+        return (is_active, is_stale)
         
     def _extract_srr_ids(self, col2, col3):
         """Extract unique SRR/ERR IDs from the two columns"""
@@ -1477,8 +1528,11 @@ class SRAWorkflow:
 
         # Priority 3-4: All FASTQs present
         if all_fastqs_ok:
-            if self._has_star_progress_dirs(sample_id):
+            has_active_alignment, has_stale_dirs = self._has_star_progress_dirs(sample_id)
+            if has_active_alignment:
                 return 'ALIGN_IN_PROGRESS'
+            elif has_stale_dirs:
+                return 'FASTQ_DONE (stale STAR dirs - cleanup recommended)'
             return 'FASTQ_DONE'
 
         # Priority 5: Active conversion job
