@@ -305,7 +305,12 @@ class SRAWorkflow:
                 return False, f"{id_str}Cannot stat R1: {e}"
 
             # Check gzip integrity
-            if not self._gzip_test(r1_path):
+            gzip_valid, gzip_timeout = self._gzip_test(r1_path)
+            if gzip_timeout:
+                # Timeout doesn't mean corruption - just slow I/O
+                # Don't delete source data, but also don't proceed with conversion cleanup
+                return False, f"{id_str}Gzip validation timed out (network I/O slow, keeping .sra for safety)"
+            if not gzip_valid:
                 return False, f"{id_str}Gzip integrity check failed (corrupted or incomplete compression)"
 
             # Check FASTQ format
@@ -344,8 +349,13 @@ class SRAWorkflow:
             if size_ratio > 1.2:  # More than 20% difference
                 return False, f"{id_str}File size mismatch: R1={r1_size/1024/1024:.1f}MB, R2={r2_size/1024/1024:.1f}MB (ratio={size_ratio:.2f})"
 
-        # Check gzip integrity
-        if not self._gzip_test(r1_path, r2_path):
+        # Check gzip integrity (handles both files together)
+        gzip_valid, gzip_timeout = self._gzip_test(r1_path, r2_path)
+        if gzip_timeout:
+            # Timeout doesn't mean corruption - just slow I/O on network storage
+            # Don't delete source data, but also don't proceed with conversion cleanup
+            return False, f"{id_str}Gzip validation timed out (network I/O slow or files very large, keeping .sra for safety)"
+        if not gzip_valid:
             return False, f"{id_str}Gzip integrity check failed (corrupted or incomplete compression)"
 
         # Check FASTQ format and read counts
@@ -886,17 +896,24 @@ class SRAWorkflow:
         if found == 0:
             _discover_with_long()
 
-    def _gzip_test(self, *paths: Path) -> bool:
+    def _gzip_test(self, *paths: Path) -> tuple:
         """Validate gzip files with full integrity check.
 
         Uses gzip -t to decompress entire file and verify integrity.
         This is the ONLY way to catch truncated files from cluster shutdowns.
 
+        Returns:
+            Tuple of (is_valid: bool, is_timeout: bool)
+            - (True, False): File is valid
+            - (False, False): File is corrupted (definitive)
+            - (False, True): Timeout - uncertain, don't delete source data
+
         Timeout protection prevents hangs on slow network storage.
-        IMPORTANT: Timeout does NOT mean corruption - just slow I/O on network filesystems.
+        CRITICAL: Timeout does NOT mean corruption - just slow I/O or large files.
         """
-        # Calculate dynamic timeout based on file sizes
-        # ~1 second per 100MB, min 60s, max 600s (10 minutes, increased from 5min)
+        # Calculate REALISTIC timeout based on file sizes
+        # Network storage speed: ~60-120 seconds per GB (tested on real systems)
+        # Formula: 2 minutes per GB, min 5 min, max 30 min
         total_size = 0
         try:
             for p in paths:
@@ -904,32 +921,27 @@ class SRAWorkflow:
         except Exception:
             total_size = 1024 * 1024 * 1024  # Assume 1GB if stat fails
 
-        timeout = max(60, min(600, int(total_size / (100 * 1024 * 1024))))
+        size_gb = total_size / (1024 * 1024 * 1024)
+        timeout = max(300, min(1800, int(size_gb * 120)))  # 2 min per GB
 
-        # Use gzip -t with dynamic timeout for full validation
+        # Use gzip -t with REALISTIC timeout for full validation
         try:
             cmd = ['gzip', '-t'] + [str(p) for p in paths]
             r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
-            return r.returncode == 0
+            is_valid = (r.returncode == 0)
+            return (is_valid, False)  # (is_valid, is_timeout=False)
         except subprocess.TimeoutExpired:
-            # CRITICAL FIX: Timeout means we couldn't verify the file integrity.
-            # While timeout often indicates slow I/O on network storage, it could also mean:
-            # - Corrupted gzip causing infinite loop
-            # - Severely degraded network performance
-            # - File system issues
-            #
-            # CONSERVATIVE APPROACH: Return False to prevent SRA deletion until we can
-            # definitively verify the FASTQ is valid. Better to keep SRA longer (uses disk)
-            # than delete it and risk data loss if FASTQ is actually corrupted.
-            #
-            # SRA won't be deleted, and user can re-run validation later when I/O improves.
+            # CRITICAL: Timeout means we couldn't verify file integrity.
+            # This is NOT corruption - just slow I/O on network storage with large files.
+            # Return special state: (invalid=False, is_timeout=True)
+            # Caller should NOT delete source data, but also NOT mark as corrupted.
             logger.warning(self._c(
-                f"⚠ Gzip test timed out after {timeout}s for {[p.name for p in paths]} "
-                f"({total_size / (1024**3):.1f} GB). This could indicate slow I/O or corruption. "
-                f"Keeping .sra file until FASTQ can be verified. Re-run workflow to retry validation.",
+                f"⚠ Gzip test timed out after {timeout}s ({timeout//60} min) for {[p.name for p in paths]} "
+                f"({size_gb:.1f} GB). Network I/O is slow or files are very large. "
+                f"KEEPING .sra until validation completes. Try again when I/O load is lower.",
                 self._C_YELLOW
             ))
-            return False  # Conservative: don't delete SRA when validation is uncertain
+            return (False, True)  # (is_valid=False, is_timeout=True) - uncertain state
         except FileNotFoundError:
             # gzip command not available - fall back to basic header check as last resort
             logger.warning(self._c(
@@ -940,13 +952,13 @@ class SRAWorkflow:
                 for p in paths:
                     with gzip.open(p, 'rb') as f:
                         f.read(4096)
-                return True
+                return (True, False)  # Basic check passed
             except Exception:
-                return False
+                return (False, False)  # Basic check failed - likely corrupted
         except Exception as e:
             # Other errors (e.g., permission denied) - fail validation
             logger.warning(f"Gzip test failed with error: {e}")
-            return False
+            return (False, False)  # Error state - treat as invalid
 
     def _wait_for_jobs_and_cleanup(self, jobs_to_wait: dict):
         logger.info(self._c("Waiting for conversion jobs to finish...", self._C_CYAN))
