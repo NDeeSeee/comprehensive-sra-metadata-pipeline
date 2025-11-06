@@ -1101,6 +1101,65 @@ class SRAWorkflow:
                 self._C_YELLOW
             ))
 
+    def cleanup_invalid_bam_files(self):
+        """Detect and remove 0-byte or otherwise invalid BAM files.
+
+        Invalid BAMs are typically created when alignment fails due to corrupted FASTQs.
+        Removing them ensures the workflow can re-process the sample correctly.
+
+        This runs early in the workflow to clean up artifacts from previous failed runs.
+        """
+        removed_bams = []
+
+        # Check both root directory and bams/ subdirectory
+        search_dirs = [self.cancer_dir]
+        bams_subdir = self.cancer_dir / 'bams'
+        if bams_subdir.is_dir():
+            search_dirs.append(bams_subdir)
+
+        for search_dir in search_dirs:
+            try:
+                for bam_file in search_dir.glob('*.bam'):
+                    try:
+                        if not bam_file.is_file():
+                            continue
+
+                        size = bam_file.stat().st_size
+
+                        # Check if BAM is 0 bytes or very small (< 1KB, likely corrupted header)
+                        if size == 0:
+                            bam_file.unlink()
+                            removed_bams.append((bam_file.name, 'empty'))
+                            logger.warning(self._c(
+                                f"  ✗ Removed 0-byte BAM: {bam_file.name}",
+                                self._C_YELLOW
+                            ))
+                        elif size < 1024:  # Less than 1KB
+                            bam_file.unlink()
+                            removed_bams.append((bam_file.name, f'{size}B'))
+                            logger.warning(self._c(
+                                f"  ✗ Removed invalid BAM ({size}B): {bam_file.name}",
+                                self._C_YELLOW
+                            ))
+
+                    except (OSError, PermissionError) as e:
+                        logger.debug(f"Could not process {bam_file}: {e}")
+                        continue
+            except Exception as e:
+                logger.debug(f"Error scanning {search_dir} for invalid BAMs: {e}")
+
+        if removed_bams:
+            logger.warning(self._c(
+                f"  ⚠ Cleaned up {len(removed_bams)} invalid BAM file(s) from previous failed runs",
+                self._C_YELLOW
+            ))
+            logger.info(self._c(
+                f"  ℹ These samples will be re-processed to generate valid BAMs",
+                self._C_CYAN
+            ))
+
+        return len(removed_bams)
+
     def cleanup_converted_sras_lightweight(self):
         """Remove .sra files when both FASTQs exist and are non-empty (no gzip validation).
 
@@ -1292,9 +1351,10 @@ class SRAWorkflow:
         # Note: No global directory change - all subprocess calls use cwd parameter for portability
         self.parse_sample_list()
         self.load_modules()
-        # Pre-run cleanup (lightweight): remove any .sra whose FASTQs already exist from prior runs
+        # Pre-run cleanup: remove invalid BAMs and artifacts from prior runs
         try:
-            logger.info(self._c("Pre-run cleanup: scanning for converted .sra and empty SRR dirs...", self._C_CYAN))
+            logger.info(self._c("Pre-run cleanup: scanning for invalid BAMs, converted .sra, and empty SRR dirs...", self._C_CYAN))
+            self.cleanup_invalid_bam_files()
             self.cleanup_converted_sras_lightweight()
             self.cleanup_empty_srr_dirs()
         except Exception:
