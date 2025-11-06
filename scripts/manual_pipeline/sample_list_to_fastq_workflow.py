@@ -1047,26 +1047,12 @@ class SRAWorkflow:
         while remaining:
             finished = []
             for srr_id, job_id in remaining.items():
-                # Fast path: if FASTQs are already present and valid, finish regardless of scheduler status
                 srr_r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
                 srr_r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
                 sra_file = self.cancer_dir / f"{srr_id}.sra"
-                # Handle both single-end and paired-end layouts
-                if srr_r1.exists():
-                    # CRITICAL: Use thorough validation before deleting source SRA
-                    is_valid, reason = self._validate_fastq_pair(srr_r1, srr_r2, srr_id, thorough=True)
-                    if is_valid:
-                        if sra_file.exists():
-                            with contextlib.suppress(Exception):
-                                sra_file.unlink()
-                                logger.info(self._c(f"  ✓ Cleaned {srr_id}.sra after successful conversion", self._C_GREEN))
-                        finished.append(srr_id)
-                        continue
-                    else:
-                        logger.warning(self._c(f"  ! {srr_id} FASTQs present but validation failed: {reason}", self._C_YELLOW))
-                        # Auto-cleanup corrupted files to enable retry on next run
-                        self._cleanup_corrupted_fastqs(srr_id, reason)
 
+                # CRITICAL FIX: Check job status FIRST before validating FASTQs
+                # If job is still running, don't validate yet - files may be incomplete!
                 status = self._bjobs_status(job_id)
                 # Treat common terminal/unknown states as finished
                 if status in ('DONE', 'EXIT', 'ZOMBIE', 'ZOMBI', 'UNKNOWN', 'UNKWN'):
