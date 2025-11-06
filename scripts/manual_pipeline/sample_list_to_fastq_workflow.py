@@ -980,9 +980,10 @@ class SRAWorkflow:
 
         size_gb = total_size / (1024 * 1024 * 1024)
 
-        # PERFORMANCE FIX: Skip gzip test for large files (>3GB)
-        # Full decompression test takes too long on network storage
-        size_threshold_gb = 3.0
+        # PERFORMANCE FIX: Skip gzip test for large files (>1GB)
+        # Full decompression test takes too long on network storage (even 30 min timeout fails)
+        # User's network is extremely slow - 2.9GB files timing out after 30 minutes
+        size_threshold_gb = 1.0
         if size_gb > size_threshold_gb:
             logger.info(self._c(
                 f"  ℹ Skipping full gzip test for large file(s) ({size_gb:.1f} GB > {size_threshold_gb} GB threshold). "
@@ -1093,9 +1094,25 @@ class SRAWorkflow:
                         log_msg = f"Check logs: {log_err}" if log_err.exists() else f"Logs: {self.logs_dir}/fastq_{srr_id}.*.txt"
 
                         if status in ('DONE', 'EXIT'):
-                            logger.warning(self._c(
-                                f"  ! {srr_id} job {status} but FASTQs missing; keeping .sra. {log_msg}",
-                                self._C_YELLOW
+                            logger.error(self._c(
+                                f"  ✗ {srr_id} job {status} but FASTQs missing! This usually means:",
+                                self._C_RED
+                            ))
+                            logger.error(self._c(
+                                f"     - Network error (Stale file handle) lost output during write",
+                                self._C_RED
+                            ))
+                            logger.error(self._c(
+                                f"     - Disk full during conversion",
+                                self._C_RED
+                            ))
+                            logger.error(self._c(
+                                f"     - Output written to wrong directory",
+                                self._C_RED
+                            ))
+                            logger.error(self._c(
+                                f"  ✗ Keeping .sra for retry. Will auto-resubmit on next run. {log_msg}",
+                                self._C_RED
                             ))
                         elif status in ('ZOMBIE', 'ZOMBI', 'UNKNOWN', 'UNKWN'):
                             logger.warning(self._c(
@@ -1118,9 +1135,21 @@ class SRAWorkflow:
                             self._C_YELLOW
                         ))
                         finished.append(srr_id)
-            # Remove finished from remaining
+            # Remove finished from remaining AND clear from submitted_jobs tracking
             for s in finished:
                 remaining.pop(s, None)
+                # CRITICAL: Remove finished job from tracking to prevent blocking future runs
+                self.submitted_jobs.pop(s, None)
+
+            # Persist updated submitted_jobs (removes finished jobs from JSON)
+            if finished:
+                db_path = self.logs_dir / 'submitted_jobs.json'
+                try:
+                    db_path.write_text(json.dumps(self.submitted_jobs, indent=2) + "\n")
+                    logger.debug(f"Cleared {len(finished)} finished job(s) from submitted_jobs.json")
+                except OSError as e:
+                    logger.warning(f"Could not update submitted_jobs.json: {e}")
+
             # Periodic status refresh each poll cycle
             try:
                 logger.info(self._c(f"Remaining conversion jobs: {len(remaining)}", self._C_CYAN))
