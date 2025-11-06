@@ -1007,10 +1007,21 @@ class SRAWorkflow:
                             self._cleanup_corrupted_fastqs(srr_id, reason)
                             finished.append(srr_id)
                     else:
+                        # Job finished but no output - check logs for why
+                        log_err = self.logs_dir / f"fastq_{srr_id}.err.txt"
+                        log_out = self.logs_dir / f"fastq_{srr_id}.out.txt"
+                        log_msg = f"Check logs: {log_err}" if log_err.exists() else f"Logs: {self.logs_dir}/fastq_{srr_id}.*.txt"
+
                         if status in ('DONE', 'EXIT'):
-                            logger.warning(self._c(f"  ! {srr_id} job {status} but FASTQs missing; keeping .sra", self._C_YELLOW))
+                            logger.warning(self._c(
+                                f"  ! {srr_id} job {status} but FASTQs missing; keeping .sra. {log_msg}",
+                                self._C_YELLOW
+                            ))
                         elif status in ('ZOMBIE', 'ZOMBI', 'UNKNOWN', 'UNKWN'):
-                            logger.warning(self._c(f"  ! {srr_id} job {status}; FASTQs missing; treating as finished", self._C_YELLOW))
+                            logger.warning(self._c(
+                                f"  ! {srr_id} job {status}; FASTQs missing; treating as finished. {log_msg}",
+                                self._C_YELLOW
+                            ))
                         finished.append(srr_id)
                 # else still running (e.g., RUN, PEND)
                 else:
