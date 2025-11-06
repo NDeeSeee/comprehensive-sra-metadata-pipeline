@@ -765,6 +765,12 @@ class SRAWorkflow:
                     if not self._validate_sra_file(sra_file):
                         logger.warning(self._c(f"  ! {srr_id}.sra exists but is invalid/corrupted; skipping conversion", self._C_YELLOW))
                         logger.warning(self._c(f"  ! Run script again to re-download this SRA", self._C_YELLOW))
+                        # Persist status so generate_status_report can show why conversion didn't happen
+                        status_file = self.logs_dir / f"conversion_{srr_id}.status"
+                        try:
+                            status_file.write_text("SRA_INVALID")
+                        except OSError:
+                            pass
                         continue
 
                     logger.info(self._c(f"→ Submitting conversion job for {srr_id}.sra", self._C_CYAN))
@@ -1473,6 +1479,21 @@ class SRAWorkflow:
                 pass
         return None
 
+    def _check_conversion_status(self, srr_ids):
+        """Check if any SRR has conversion issues."""
+        invalid_sras = []
+        for sid in srr_ids:
+            status_path = self.logs_dir / f"conversion_{sid}.status"
+            try:
+                status = status_path.read_text().strip()
+                if status == "SRA_INVALID":
+                    invalid_sras.append(sid)
+            except (FileNotFoundError, OSError):
+                pass
+        if invalid_sras:
+            return f"NEEDS_CONVERSION (invalid SRA: {', '.join(invalid_sras[:3])}{'...' if len(invalid_sras) > 3 else ''})"
+        return None
+
     def _analyze_fastq_status(self, srr_ids):
         """Analyze FASTQ file status for all SRRs in a sample.
 
@@ -1543,6 +1564,10 @@ class SRAWorkflow:
 
         # Priority 6: SRA exists but needs conversion
         if any_sra_present_missing_fastq:
+            # Check if we have detailed status about WHY conversion didn't happen
+            detailed_status = self._check_conversion_status(srr_ids)
+            if detailed_status:
+                return detailed_status
             return 'NEEDS_CONVERSION'
 
         # Priority 7: Nothing exists, needs prefetch
