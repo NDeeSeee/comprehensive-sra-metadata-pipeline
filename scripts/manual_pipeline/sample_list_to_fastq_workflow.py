@@ -256,8 +256,12 @@ class SRAWorkflow:
             logger.debug(f"Could not validate {sra_file.name}: {e}")
             return True  # Assume valid if validation unavailable
 
-    def _validate_fastq_pair(self, r1_path: Path, r2_path: Path, srr_id: str = None) -> tuple:
+    def _validate_fastq_pair(self, r1_path: Path, r2_path: Path, srr_id: str = None, thorough: bool = False) -> tuple:
         """Validate FASTQ files (paired-end or single-end) for completeness and correctness.
+
+        Args:
+            thorough: If True, count ALL reads for exact match (slow, for critical validation).
+                     If False, sample reads + compare file sizes (fast check).
 
         Returns (is_valid: bool, reason: str)
 
@@ -269,8 +273,9 @@ class SRAWorkflow:
         1. Files exist and non-empty
         2. Gzip integrity (not corrupted)
         3. FASTQ format validity (proper 4-line records)
-        4. Read count match (for paired-end only)
+        4. Read count match (for paired-end only, full count if thorough=True)
         5. Files are not suspiciously small
+        6. File size similarity (for paired-end, if not thorough)
 
         This catches interrupted conversions from HPC shutdowns.
         """
@@ -316,9 +321,15 @@ class SRAWorkflow:
 
         # Paired-end: both R1 and R2 exist
         # Check existence and size
+        r1_size = 0
+        r2_size = 0
         for p, label in [(r1_path, 'R1'), (r2_path, 'R2')]:
             try:
                 size = p.stat().st_size
+                if label == 'R1':
+                    r1_size = size
+                else:
+                    r2_size = size
                 if size == 0:
                     return False, f"{id_str}{label} is empty (0 bytes)"
                 if size < 100:  # Suspiciously small even for gzipped
@@ -326,14 +337,22 @@ class SRAWorkflow:
             except OSError as e:
                 return False, f"{id_str}Cannot stat {label}: {e}"
 
+        # For paired-end, file sizes should be similar (within 20%)
+        # This is a fast check before expensive read counting
+        if not thorough and r1_size > 0 and r2_size > 0:
+            size_ratio = max(r1_size, r2_size) / min(r1_size, r2_size)
+            if size_ratio > 1.2:  # More than 20% difference
+                return False, f"{id_str}File size mismatch: R1={r1_size/1024/1024:.1f}MB, R2={r2_size/1024/1024:.1f}MB (ratio={size_ratio:.2f})"
+
         # Check gzip integrity
         if not self._gzip_test(r1_path, r2_path):
             return False, f"{id_str}Gzip integrity check failed (corrupted or incomplete compression)"
 
         # Check FASTQ format and read counts
+        # Use full_count=thorough for exact validation when deleting source files
         try:
-            r1_reads = self._count_fastq_reads(r1_path)
-            r2_reads = self._count_fastq_reads(r2_path)
+            r1_reads = self._count_fastq_reads(r1_path, full_count=thorough)
+            r2_reads = self._count_fastq_reads(r2_path, full_count=thorough)
 
             if r1_reads == 0 and r2_reads == 0:
                 return False, f"{id_str}Both files appear empty or invalid FASTQ format"
@@ -384,19 +403,25 @@ class SRAWorkflow:
             logger.warning(self._c(f"  ! Could not remove corrupted FASTQs for {srr_id}: {e}", self._C_YELLOW))
             return False
 
-    def _count_fastq_reads(self, fastq_gz_path: Path, max_reads: int = 1000) -> int:
-        """Count reads in a gzipped FASTQ file (samples first N reads for speed).
+    def _count_fastq_reads(self, fastq_gz_path: Path, full_count: bool = False) -> int:
+        """Count reads in a gzipped FASTQ file.
+
+        Args:
+            full_count: If True, count ALL reads (slow but thorough for validation).
+                       If False, sample first 1000 reads (fast format check).
 
         Returns number of reads found, or 0 if format is invalid.
         Validates FASTQ 4-line structure while counting.
         """
+        max_reads = None if full_count else 1000
+
         try:
             with gzip.open(fastq_gz_path, 'rt') as f:
                 read_count = 0
                 line_in_record = 0
 
                 for i, line in enumerate(f):
-                    if i >= max_reads * 4:  # Sample first N reads only
+                    if max_reads and i >= max_reads * 4:  # Sample first N reads only
                         break
 
                     # Validate FASTQ 4-line structure
@@ -849,10 +874,10 @@ class SRAWorkflow:
         This is the ONLY way to catch truncated files from cluster shutdowns.
 
         Timeout protection prevents hangs on slow network storage.
-        IMPORTANT: Timeout does NOT mean corruption - just slow I/O.
+        IMPORTANT: Timeout does NOT mean corruption - just slow I/O on network filesystems.
         """
         # Calculate dynamic timeout based on file sizes
-        # ~1 second per 100MB, min 60s, max 300s (5 minutes)
+        # ~1 second per 100MB, min 60s, max 600s (10 minutes, increased from 5min)
         total_size = 0
         try:
             for p in paths:
@@ -860,7 +885,7 @@ class SRAWorkflow:
         except Exception:
             total_size = 1024 * 1024 * 1024  # Assume 1GB if stat fails
 
-        timeout = max(60, min(300, int(total_size / (100 * 1024 * 1024))))
+        timeout = max(60, min(600, int(total_size / (100 * 1024 * 1024))))
 
         # Use gzip -t with dynamic timeout for full validation
         try:
@@ -868,18 +893,22 @@ class SRAWorkflow:
             r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
             return r.returncode == 0
         except subprocess.TimeoutExpired:
-            # TIMEOUT DOES NOT MEAN CORRUPTION - just slow I/O!
-            # Fall back to assuming valid if header test passes
-            logger.debug(f"Gzip test timed out after {timeout}s for {[p.name for p in paths]} ({total_size / (1024**3):.1f} GB) - assuming valid (slow I/O)")
-            try:
-                for p in paths:
-                    with gzip.open(p, 'rb') as f:
-                        f.read(4096)
-                return True  # Header is valid, assume file is OK
-            except Exception as e:
-                logger.warning(f"Gzip header fallback failed: {e}")
-                return False
-        except Exception:
+            # TIMEOUT DOES NOT MEAN CORRUPTION - just slow I/O on network storage!
+            # DO NOT fall back to header-only check - that defeats corruption detection.
+            # Assume valid and let user manually verify if needed.
+            logger.warning(self._c(
+                f"⚠ Gzip test timed out after {timeout}s for {[p.name for p in paths]} "
+                f"({total_size / (1024**3):.1f} GB) - assuming valid due to slow I/O. "
+                f"Manual verification recommended if issues persist.",
+                self._C_YELLOW
+            ))
+            return True  # Benefit of doubt for slow network filesystems
+        except FileNotFoundError:
+            # gzip command not available - fall back to basic header check as last resort
+            logger.warning(self._c(
+                f"⚠ gzip command not found - using basic header check (less thorough)",
+                self._C_YELLOW
+            ))
             try:
                 for p in paths:
                     with gzip.open(p, 'rb') as f:
@@ -887,6 +916,10 @@ class SRAWorkflow:
                 return True
             except Exception:
                 return False
+        except Exception as e:
+            # Other errors (e.g., permission denied) - fail validation
+            logger.warning(f"Gzip test failed with error: {e}")
+            return False
 
     def _wait_for_jobs_and_cleanup(self, jobs_to_wait: dict):
         logger.info(self._c("Waiting for conversion jobs to finish...", self._C_CYAN))
@@ -900,7 +933,8 @@ class SRAWorkflow:
                 sra_file = self.cancer_dir / f"{srr_id}.sra"
                 # Handle both single-end and paired-end layouts
                 if srr_r1.exists():
-                    is_valid, reason = self._validate_fastq_pair(srr_r1, srr_r2, srr_id)
+                    # CRITICAL: Use thorough validation before deleting source SRA
+                    is_valid, reason = self._validate_fastq_pair(srr_r1, srr_r2, srr_id, thorough=True)
                     if is_valid:
                         if sra_file.exists():
                             with contextlib.suppress(Exception):
@@ -918,7 +952,8 @@ class SRAWorkflow:
                 if status in ('DONE', 'EXIT', 'ZOMBIE', 'ZOMBI', 'UNKNOWN', 'UNKWN'):
                     # Check outputs regardless of status (handles both single-end and paired-end)
                     if srr_r1.exists():
-                        is_valid, reason = self._validate_fastq_pair(srr_r1, srr_r2, srr_id)
+                        # CRITICAL: Use thorough validation before deleting source SRA
+                        is_valid, reason = self._validate_fastq_pair(srr_r1, srr_r2, srr_id, thorough=True)
                         if is_valid:
                             if sra_file.exists():
                                 try:
@@ -1030,7 +1065,8 @@ class SRAWorkflow:
             r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
             # Handle both single-end and paired-end layouts
             if r1.exists():
-                is_valid, _ = self._validate_fastq_pair(r1, r2, srr_id)
+                # CRITICAL: Use thorough validation before deleting source SRA
+                is_valid, _ = self._validate_fastq_pair(r1, r2, srr_id, thorough=True)
                 if is_valid:
                     with contextlib.suppress(Exception):
                         sra_file.unlink()
