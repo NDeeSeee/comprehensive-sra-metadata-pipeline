@@ -1003,6 +1003,74 @@ class SRAWorkflow:
     
     # merge_fastq_files disabled: SRR-level FASTQs are final outputs
 
+    def _is_sra_safe_to_delete(self, sra_file: Path, srr_id: str) -> tuple:
+        """Multi-layered safety check before deleting .sra file.
+
+        Returns (is_safe: bool, reason: str)
+
+        Checks (in order):
+        1. lsof - Is file currently open by any process?
+        2. FASTQ recency - Were FASTQs modified in last 2 minutes? (conversion might still be writing)
+        3. File atime - Was .sra accessed recently? (if filesystem supports atime)
+
+        This prevents race conditions where fastq-dump might be using the file.
+        """
+        current_time = time.time()
+
+        # Layer 1: Check if file has open handles using lsof
+        try:
+            result = subprocess.run(
+                ['lsof', str(sra_file)],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                # File has open handles
+                return False, f"File has open handles (lsof detected active process)"
+        except FileNotFoundError:
+            # lsof not available, skip this check
+            logger.debug("lsof not available, skipping open file handle check")
+        except subprocess.TimeoutExpired:
+            logger.debug("lsof check timed out")
+        except Exception as e:
+            logger.debug(f"lsof check failed: {e}")
+
+        # Layer 2: Check if FASTQs were modified very recently
+        # If conversion just finished, give it 2 minutes to stabilize
+        r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
+        r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
+
+        min_age_seconds = 120  # 2 minutes
+
+        try:
+            if r1.exists():
+                r1_age = current_time - r1.stat().st_mtime
+                if r1_age < min_age_seconds:
+                    return False, f"R1 modified {r1_age:.0f}s ago (< {min_age_seconds}s minimum)"
+
+            if r2.exists():
+                r2_age = current_time - r2.stat().st_mtime
+                if r2_age < min_age_seconds:
+                    return False, f"R2 modified {r2_age:.0f}s ago (< {min_age_seconds}s minimum)"
+        except OSError as e:
+            logger.debug(f"Could not check FASTQ modification time: {e}")
+
+        # Layer 3: Check .sra access time (if filesystem supports it)
+        # Some network filesystems mount with noatime, so this might not work
+        try:
+            stat_info = sra_file.stat()
+            # Check if atime is supported (not same as mtime/ctime)
+            if stat_info.st_atime != stat_info.st_ctime:
+                sra_atime_age = current_time - stat_info.st_atime
+                if sra_atime_age < min_age_seconds:
+                    return False, f".sra accessed {sra_atime_age:.0f}s ago (< {min_age_seconds}s minimum)"
+        except OSError as e:
+            logger.debug(f"Could not check .sra access time: {e}")
+
+        # All checks passed
+        return True, "All safety checks passed"
+
     def cleanup_empty_srr_dirs(self):
         """Remove empty accession directories (SRR*/ERR*) left by prefetch."""
         for entry in self.cancer_dir.iterdir():
@@ -1057,6 +1125,7 @@ class SRAWorkflow:
             for sid in s['srr_ids']:
                 srr_ids.add(sid)
         removed = 0
+        skipped_unsafe = 0
         for srr_id in sorted(srr_ids):
             sra_file = self.cancer_dir / f"{srr_id}.sra"
             if not sra_file.exists():
@@ -1068,11 +1137,19 @@ class SRAWorkflow:
                 # CRITICAL: Use thorough validation before deleting source SRA
                 is_valid, _ = self._validate_fastq_pair(r1, r2, srr_id, thorough=True)
                 if is_valid:
-                    with contextlib.suppress(Exception):
-                        sra_file.unlink()
-                        removed += 1
+                    # Multi-layered safety check before deletion
+                    is_safe, reason = self._is_sra_safe_to_delete(sra_file, srr_id)
+                    if is_safe:
+                        with contextlib.suppress(Exception):
+                            sra_file.unlink()
+                            removed += 1
+                    else:
+                        logger.debug(f"Skipping {srr_id}.sra deletion: {reason}")
+                        skipped_unsafe += 1
         if removed:
             logger.info(self._c(f"  ✓ Global cleanup removed {removed} converted .sra files", self._C_GREEN))
+        if skipped_unsafe:
+            logger.info(self._c(f"  ℹ Skipped {skipped_unsafe} .sra file(s) due to safety checks (in use or recently modified)", self._C_CYAN))
 
     def cleanup_artifacts_for_completed_samples(self):
         """If a sample has a BAM, remove its SRR .sra and FASTQs to free space.
@@ -1239,6 +1316,7 @@ class SRAWorkflow:
             for sid in s['srr_ids']:
                 srr_ids.add(sid)
         removed = 0
+        skipped_unsafe = 0
         for srr_id in sorted(srr_ids):
             sra_file = self.cancer_dir / f"{srr_id}.sra"
             if not sra_file.exists():
@@ -1247,13 +1325,21 @@ class SRAWorkflow:
             r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
             try:
                 if r1.exists() and r2.exists() and r1.stat().st_size > 0 and r2.stat().st_size > 0:
-                    with contextlib.suppress(Exception):
-                        sra_file.unlink()
-                        removed += 1
+                    # Multi-layered safety check before deletion
+                    is_safe, reason = self._is_sra_safe_to_delete(sra_file, srr_id)
+                    if is_safe:
+                        with contextlib.suppress(Exception):
+                            sra_file.unlink()
+                            removed += 1
+                    else:
+                        logger.debug(f"Skipping {srr_id}.sra deletion: {reason}")
+                        skipped_unsafe += 1
             except Exception:
                 continue
         if removed:
             logger.info(self._c(f"  ✓ Lightweight cleanup removed {removed} converted .sra files", self._C_GREEN))
+        elif skipped_unsafe:
+            logger.info(self._c(f"  ℹ No .sra files removed; skipped {skipped_unsafe} file(s) due to safety checks", self._C_CYAN))
         else:
             logger.info(self._c("  ✓ Lightweight cleanup: no .sra files to remove", self._C_GREEN))
     
