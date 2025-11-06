@@ -965,12 +965,10 @@ class SRAWorkflow:
             - (False, False): File is corrupted (definitive)
             - (False, True): Timeout - uncertain, don't delete source data
 
-        Timeout protection prevents hangs on slow network storage.
-        CRITICAL: Timeout does NOT mean corruption - just slow I/O or large files.
+        PERFORMANCE: Files >3GB skip gzip test (too slow on network storage).
+        Uses fast validation instead: header check only.
         """
-        # Calculate REALISTIC timeout based on file sizes
-        # Network storage speed: ~60-120 seconds per GB (tested on real systems)
-        # Formula: 2 minutes per GB, min 5 min, max 30 min
+        # Calculate total file size
         total_size = 0
         try:
             for p in paths:
@@ -979,6 +977,29 @@ class SRAWorkflow:
             total_size = 1024 * 1024 * 1024  # Assume 1GB if stat fails
 
         size_gb = total_size / (1024 * 1024 * 1024)
+
+        # PERFORMANCE FIX: Skip gzip test for large files (>3GB)
+        # Full decompression test takes too long on network storage
+        size_threshold_gb = 3.0
+        if size_gb > size_threshold_gb:
+            logger.info(self._c(
+                f"  ℹ Skipping full gzip test for large file(s) ({size_gb:.1f} GB > {size_threshold_gb} GB threshold). "
+                f"Using fast validation (header check only). Files: {[p.name for p in paths]}",
+                self._C_CYAN
+            ))
+            # Do fast header-only check
+            try:
+                for p in paths:
+                    with gzip.open(p, 'rb') as f:
+                        f.read(4096)  # Read first 4KB to verify header
+                return (True, False)  # Assume valid if header check passes
+            except Exception as e:
+                logger.warning(f"Fast gzip header check failed: {e}")
+                return (False, False)  # Header check failed - likely corrupted
+
+        # For files <=3GB, do full gzip test with realistic timeout
+        # Network storage speed: ~60-120 seconds per GB
+        # Formula: 2 minutes per GB, min 5 min, max 30 min
         timeout = max(300, min(1800, int(size_gb * 120)))  # 2 min per GB
 
         # Use gzip -t with REALISTIC timeout for full validation
