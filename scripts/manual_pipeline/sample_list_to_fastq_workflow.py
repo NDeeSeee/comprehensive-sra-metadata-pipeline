@@ -310,7 +310,7 @@ class SRAWorkflow:
 
             # Check FASTQ format
             try:
-                r1_reads = self._count_fastq_reads(r1_path)
+                r1_reads, r1_eof = self._count_fastq_reads(r1_path)
                 if r1_reads == 0:
                     return False, f"{id_str}R1 has no valid reads"
 
@@ -351,8 +351,8 @@ class SRAWorkflow:
         # Check FASTQ format and read counts
         # Use full_count=thorough for exact validation when deleting source files
         try:
-            r1_reads = self._count_fastq_reads(r1_path, full_count=thorough)
-            r2_reads = self._count_fastq_reads(r2_path, full_count=thorough)
+            r1_reads, r1_eof = self._count_fastq_reads(r1_path, full_count=thorough)
+            r2_reads, r2_eof = self._count_fastq_reads(r2_path, full_count=thorough)
 
             if r1_reads == 0 and r2_reads == 0:
                 return False, f"{id_str}Both files appear empty or invalid FASTQ format"
@@ -360,6 +360,19 @@ class SRAWorkflow:
                 return False, f"{id_str}R1 has no valid reads"
             if r2_reads == 0:
                 return False, f"{id_str}R2 has no valid reads"
+
+            # CRITICAL FIX: When sampling (not thorough), if both files hit the sample limit,
+            # we can't definitively say they match. Need stricter file size validation.
+            if not thorough and not r1_eof and not r2_eof:
+                # Both files have MORE reads than we sampled (both >1000 reads)
+                # Sample counts match, but we need to verify full file integrity via size
+                if r1_size > 0 and r2_size > 0:
+                    size_ratio = max(r1_size, r2_size) / min(r1_size, r2_size)
+                    # Stricter threshold: 5% for sampled validation (vs 20% for quick check)
+                    # This catches cases where R1 is 50M reads but R2 is 10M reads
+                    if size_ratio > 1.05:
+                        return False, f"{id_str}File size mismatch in sampled validation: R1={r1_size/1024/1024:.1f}MB, R2={r2_size/1024/1024:.1f}MB (ratio={size_ratio:.2f}, >5% difference suggests truncation)"
+
             if r1_reads != r2_reads:
                 return False, f"{id_str}Read count mismatch: R1={r1_reads}, R2={r2_reads} (interrupted conversion)"
 
@@ -403,14 +416,18 @@ class SRAWorkflow:
             logger.warning(self._c(f"  ! Could not remove corrupted FASTQs for {srr_id}: {e}", self._C_YELLOW))
             return False
 
-    def _count_fastq_reads(self, fastq_gz_path: Path, full_count: bool = False) -> int:
+    def _count_fastq_reads(self, fastq_gz_path: Path, full_count: bool = False) -> tuple:
         """Count reads in a gzipped FASTQ file.
 
         Args:
             full_count: If True, count ALL reads (slow but thorough for validation).
                        If False, sample first 1000 reads (fast format check).
 
-        Returns number of reads found, or 0 if format is invalid.
+        Returns:
+            Tuple of (read_count: int, reached_eof: bool)
+            - read_count: number of reads found, or 0 if format is invalid
+            - reached_eof: True if we read entire file, False if stopped at sample limit
+
         Validates FASTQ 4-line structure while counting.
         """
         max_reads = None if full_count else 1000
@@ -419,20 +436,22 @@ class SRAWorkflow:
             with gzip.open(fastq_gz_path, 'rt') as f:
                 read_count = 0
                 line_in_record = 0
+                reached_eof = True
 
                 for i, line in enumerate(f):
-                    if max_reads and i >= max_reads * 4:  # Sample first N reads only
+                    if max_reads and read_count >= max_reads:  # Sample first N reads only
+                        reached_eof = False
                         break
 
                     # Validate FASTQ 4-line structure
                     if line_in_record == 0:  # Header line
                         if not line.startswith('@'):
                             logger.warning(f"Invalid FASTQ header at line {i+1} in {fastq_gz_path.name}")
-                            return 0
+                            return (0, False)
                     elif line_in_record == 2:  # '+' separator line
                         if not line.startswith('+'):
                             logger.warning(f"Invalid FASTQ separator at line {i+1} in {fastq_gz_path.name}")
-                            return 0
+                            return (0, False)
 
                     line_in_record += 1
                     if line_in_record == 4:
@@ -442,16 +461,16 @@ class SRAWorkflow:
                 # Check if file ended mid-record (truncated)
                 if line_in_record != 0:
                     logger.warning(f"Truncated FASTQ record in {fastq_gz_path.name} (incomplete 4-line record)")
-                    return 0
+                    return (0, False)
 
-                return read_count if read_count > 0 else 0
+                return (read_count if read_count > 0 else 0, reached_eof)
 
         except EOFError:
             logger.warning(f"Unexpected EOF in {fastq_gz_path.name} (interrupted compression)")
-            return 0
+            return (0, False)
         except Exception as e:
             logger.debug(f"Error counting reads in {fastq_gz_path.name}: {e}")
-            return 0
+            return (0, False)
     
     def load_modules(self):
         """Load required modules (sratoolkit and aspera).
