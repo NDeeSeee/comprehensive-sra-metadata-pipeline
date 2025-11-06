@@ -423,16 +423,18 @@ class SRAWorkflow:
                 return False, f"{id_str}R2 has no valid reads"
 
             # CRITICAL FIX: When sampling (not thorough), if both files hit the sample limit,
-            # we can't definitively say they match. Need stricter file size validation.
+            # we can't definitively say they match. Need file size validation for GROSS mismatches.
             if not thorough and not r1_eof and not r2_eof:
                 # Both files have MORE reads than we sampled (both >1000 reads)
-                # Sample counts match, but we need to verify full file integrity via size
+                # Sample counts match, but verify no GROSS size mismatch (truncation)
                 if r1_size > 0 and r2_size > 0:
                     size_ratio = max(r1_size, r2_size) / min(r1_size, r2_size)
-                    # Stricter threshold: 5% for sampled validation (vs 20% for quick check)
-                    # This catches cases where R1 is 50M reads but R2 is 10M reads
-                    if size_ratio > 1.05:
-                        return False, f"{id_str}File size mismatch in sampled validation: R1={r1_size/1024/1024:.1f}MB, R2={r2_size/1024/1024:.1f}MB (ratio={size_ratio:.2f}, >5% difference suggests truncation)"
+                    # REALISTIC threshold: 50% for sampled validation
+                    # NOTE: 5-15% difference is NORMAL for paired-end (different compression ratios)
+                    # Only flag GROSS mismatches like R1=5GB, R2=1GB (5x = 400% difference)
+                    # 50% threshold = 1.5x ratio = catches real truncation without false positives
+                    if size_ratio > 1.50:
+                        return False, f"{id_str}File size mismatch in sampled validation: R1={r1_size/1024/1024:.1f}MB, R2={r2_size/1024/1024:.1f}MB (ratio={size_ratio:.2f}, >50% difference suggests truncation)"
 
             if r1_reads != r2_reads:
                 return False, f"{id_str}Read count mismatch: R1={r1_reads}, R2={r2_reads} (interrupted conversion)"
@@ -997,10 +999,10 @@ class SRAWorkflow:
                 logger.warning(f"Fast gzip header check failed: {e}")
                 return (False, False)  # Header check failed - likely corrupted
 
-        # For files <=3GB, do full gzip test with realistic timeout
-        # Network storage speed: ~60-120 seconds per GB
-        # Formula: 2 minutes per GB, min 5 min, max 30 min
-        timeout = max(300, min(1800, int(size_gb * 120)))  # 2 min per GB
+        # For files <=3GB, do full gzip test with VERY LONG timeout
+        # Network storage can be EXTREMELY slow under load
+        # Formula: 10 minutes per GB, min 30 min (user requirement), max 60 min
+        timeout = max(1800, min(3600, int(size_gb * 600)))  # 10 min per GB, min 30 min
 
         # Use gzip -t with REALISTIC timeout for full validation
         try:
