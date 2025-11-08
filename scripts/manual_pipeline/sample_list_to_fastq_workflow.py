@@ -660,6 +660,26 @@ class SRAWorkflow:
         srr_r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
         srr_r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
 
+        # Clean up orphaned prefetch temporary files from interrupted downloads
+        # These files prevent successful re-download and waste disk space
+        orphaned_files = [
+            self.cancer_dir / f"{srr_id}.sra.tmp",
+            self.cancer_dir / f"{srr_id}.sra.lock",
+            self.cancer_dir / f"{srr_id}.sra.prf",
+            self.cancer_dir / f"{srr_id}.sralite.tmp",
+            self.cancer_dir / f"{srr_id}.sralite.lock",
+            self.cancer_dir / f"{srr_id}.sralite.prf"
+        ]
+        for orphan in orphaned_files:
+            if orphan.exists():
+                try:
+                    size = orphan.stat().st_size
+                    orphan.unlink()
+                    if size > 1024*1024:  # Only log if > 1MB
+                        logger.info(f"    ✓ Removed orphaned {orphan.name} ({size/1024/1024:.1f}MB)")
+                except Exception as e:
+                    logger.debug(f"Could not remove {orphan.name}: {e}")
+
         # Skip if SRR-level FASTQs already exist AND are valid (handles both single-end and paired-end)
         if srr_r1.exists():
             is_valid, reason = self._validate_fastq_pair(srr_r1, srr_r2, srr_id)
