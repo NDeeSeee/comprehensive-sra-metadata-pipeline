@@ -174,6 +174,31 @@ class SRAWorkflow:
             logger.debug(f"Error checking BAM existence for {sample_id}: {e}")
         return False
 
+    def _sample_has_all_fastqs(self, sample_id: str) -> bool:
+        """Return True if all SRR FASTQs exist and are valid for this sample.
+
+        Checks both single-ended (R1 only) and paired-end (R1+R2) layouts.
+        Uses lightweight validation (no thorough read counting).
+        """
+        try:
+            srr_ids = self.samples.get(sample_id, {}).get('srr_ids', [])
+            if not srr_ids:
+                return False
+
+            for srr_id in srr_ids:
+                r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
+                r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
+
+                # Check if FASTQs exist and are valid
+                is_valid, _ = self._validate_fastq_pair(r1, r2, srr_id, thorough=False)
+                if not is_valid:
+                    return False  # At least one SRR missing or invalid
+
+            return True  # All SRRs have valid FASTQs
+        except Exception as e:
+            logger.debug(f"Error checking FASTQs for {sample_id}: {e}")
+            return False
+
     def _has_star_progress_dirs(self, sample_id: str) -> tuple:
         """Check if STAR alignment is actively running (not just stale directories).
 
@@ -609,10 +634,16 @@ class SRAWorkflow:
 
         tasks = []
         for sample_id, sample_data in self.samples.items():
-            # Skip entire sample if BAM already exists
-            if self._sample_has_bam(sample_id):
-                logger.info(self._c(f"✓ {sample_id}: BAM exists; skipping SRA downloads for all SRRs", self._C_GREEN))
+            # Skip entire sample if BAM already exists AND all FASTQs are valid
+            has_bam = self._sample_has_bam(sample_id)
+            has_fastqs = self._sample_has_all_fastqs(sample_id)
+
+            if has_bam and has_fastqs:
+                logger.info(self._c(f"✓ {sample_id}: BAM and FASTQs exist; skipping SRA downloads", self._C_GREEN))
                 continue
+            elif has_bam and not has_fastqs:
+                logger.info(self._c(f"→ {sample_id}: BAM exists but FASTQs missing/invalid; will download", self._C_YELLOW))
+
             for srr_id in sample_data['srr_ids']:
                 tasks.append((srr_id, sample_id))
 
@@ -748,10 +779,15 @@ class SRAWorkflow:
         skipped_dbgap = 0
         submitted = 0
         for sample_id, sample_data in self.samples.items():
-            # Skip conversion entirely if BAM already exists for this sample
-            if self._sample_has_bam(sample_id):
-                logger.info(self._c(f"✓ {sample_id}: BAM exists; skipping SRA->FASTQ conversion", self._C_GREEN))
+            # Skip conversion entirely if BAM already exists AND all FASTQs are valid
+            has_bam = self._sample_has_bam(sample_id)
+            has_fastqs = self._sample_has_all_fastqs(sample_id)
+
+            if has_bam and has_fastqs:
+                logger.info(self._c(f"✓ {sample_id}: BAM and FASTQs exist; skipping SRA->FASTQ conversion", self._C_GREEN))
                 continue
+            elif has_bam and not has_fastqs:
+                logger.info(self._c(f"→ {sample_id}: BAM exists but FASTQs missing/invalid; will convert", self._C_YELLOW))
 
             for srr_id in sample_data['srr_ids']:
                 total_srrs += 1
