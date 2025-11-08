@@ -102,8 +102,11 @@ module load sratoolkit/2.10.4
 
 cd "$DIR"
 
-# Use SRA_FILE variable (supports both .sra and .sralite)
-fastq-dump --split-files "${SRA_FILE}" --origfmt --gzip -O .
+# CRITICAL: Pass SRR ID (not filename) to fastq-dump!
+# fastq-dump auto-detects local .sra or .sralite files
+# Passing filename causes wrong output names: SRR123.sralite_1.fastq.gz
+# Passing SRR ID creates correct names: SRR123_1.fastq.gz
+fastq-dump --split-files "${SRR_ID}" --origfmt --gzip -O .
 FASTQ_DUMP_EXIT=\$?
 
 # Only cleanup if fastq-dump succeeded AND FASTQs exist with content
@@ -193,11 +196,12 @@ module load sratoolkit/2.10.4
 
 cd "$DIR"
 
-# Use basename only since we cd'd into the directory
-# This avoids fastq-dump URL-decoding issues with special chars like '+'
-# Get the actual filename (supports both .sra and .sralite)
-SRA_BASENAME=\$(basename "$INPUTFILE")
-fastq-dump --split-files "\${SRA_BASENAME}" --origfmt --gzip -O .
+# CRITICAL: Pass SRR ID (not filename) to fastq-dump!
+# fastq-dump auto-detects local .sra or .sralite files
+# Passing filename causes wrong output names: SRR123.sralite_1.fastq.gz
+# Passing SRR ID creates correct names: SRR123_1.fastq.gz
+# This also avoids URL-decoding issues with special chars like '+'
+fastq-dump --split-files "${SAMPLE}" --origfmt --gzip -O .
 FASTQ_DUMP_EXIT=\$?
 
 # Only cleanup if fastq-dump succeeded AND FASTQs exist with content
@@ -207,16 +211,22 @@ if [ \$FASTQ_DUMP_EXIT -eq 0 ]; then
         # R1 exists and non-empty. For paired-end, R2 must also exist and be non-empty.
         # For single-end, R2 won't exist.
         if [ ! -f "${SAMPLE}_2.fastq.gz" ] || [ -s "${SAMPLE}_2.fastq.gz" ]; then
-            rm -f "\${SRA_BASENAME}"
-            echo "✓ FASTQ conversion succeeded; removed \${SRA_BASENAME}"
+            # Find and remove the actual SRA file (supports both .sra and .sralite)
+            if [ -f "${SAMPLE}.sra" ]; then
+                rm -f "${SAMPLE}.sra"
+                echo "✓ FASTQ conversion succeeded; removed ${SAMPLE}.sra"
+            elif [ -f "${SAMPLE}.sralite" ]; then
+                rm -f "${SAMPLE}.sralite"
+                echo "✓ FASTQ conversion succeeded; removed ${SAMPLE}.sralite"
+            fi
         else
-            echo "FASTQ conversion succeeded but R2 exists but empty for ${SAMPLE}; retaining \${SRA_BASENAME}" 1>&2
+            echo "FASTQ conversion succeeded but R2 exists but empty for ${SAMPLE}; retaining SRA file" 1>&2
         fi
     else
-        echo "FASTQ conversion succeeded but R1 missing or empty for ${SAMPLE}; retaining \${SRA_BASENAME}" 1>&2
+        echo "FASTQ conversion succeeded but R1 missing or empty for ${SAMPLE}; retaining SRA file" 1>&2
     fi
 else
-    echo "FASTQ conversion failed (exit \$FASTQ_DUMP_EXIT) for ${SAMPLE}; retaining \${SRA_BASENAME}" 1>&2
+    echo "FASTQ conversion failed (exit \$FASTQ_DUMP_EXIT) for ${SAMPLE}; retaining SRA file" 1>&2
 fi
 
 EOF
