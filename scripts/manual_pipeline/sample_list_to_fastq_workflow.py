@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 class SRAWorkflow:
     """Handles SRA download and FASTQ conversion workflow"""
-    
+
     def __init__(self, cancer_dir, no_wait: bool = False, poll_interval_sec: int = 60, prefetch_workers: int = 32, gzip_test_timeout: int = 60):
         self.cancer_dir = Path(cancer_dir)
         self.sample_list_path = self.cancer_dir / "sample_list.txt"
@@ -85,7 +85,7 @@ class SRAWorkflow:
 
     def _c(self, text: str, color: str) -> str:
         return f"{color}{text}{self._C_RESET}" if self._use_color else text
-        
+
     def parse_sample_list(self):
         """Parse sample_list.txt and extract SRR/ERR IDs for each sample"""
         if not self.sample_list_path.exists():
@@ -165,9 +165,11 @@ class SRAWorkflow:
             if _dir_has_bam(self.cancer_dir):
                 return True
             # bams/ subdirectory
-            bams_dir = self.cancer_dir / 'bams'
-            if bams_dir.is_dir() and _dir_has_bam(bams_dir):
-                return True
+            candidates = [self.cancer_dir, self.cancer_dir/'bams', self.cancer_dir/'bams1'] \
+                + [d for d in self.cancer_dir.glob('bams*') if d.is_dir()]
+            for d in candidates:
+                if d.is_dir() and _dir_has_bam(d):
+                    return True
         except Exception as e:
             logger.debug(f"Error checking BAM existence for {sample_id}: {e}")
         return False
@@ -242,7 +244,7 @@ class SRAWorkflow:
         is_stale = (not is_active) and len(found_dirs) > 0
 
         return (is_active, is_stale)
-        
+
     def _extract_srr_ids(self, col2, col3):
         """Extract unique SRR/ERR IDs from the two columns"""
         ids = set()
@@ -555,7 +557,7 @@ class SRAWorkflow:
         except Exception as e:
             logger.debug(f"Error counting reads in {fastq_gz_path.name}: {e}")
             return (0, False)
-    
+
     def load_modules(self):
         """Load required modules (sratoolkit and aspera).
 
@@ -598,13 +600,13 @@ class SRAWorkflow:
                 f"Some modules failed to load: {', '.join(modules_failed)}. "
                 "Ensure required tools (prefetch, fastq-dump) are available in PATH."
             )
-    
+
     def download_sra_files(self):
         """Step 1: Download SRA files for all samples"""
         logger.info("=" * 50)
         logger.info(self._c("STEP 1: Download SRA files (if needed)", self._C_CYAN))
         logger.info("=" * 50)
-        
+
         tasks = []
         for sample_id, sample_data in self.samples.items():
             # Skip entire sample if BAM already exists
@@ -623,7 +625,7 @@ class SRAWorkflow:
             futures = [pool.submit(self._download_single_sra, srr_id, sample_id) for srr_id, sample_id in tasks]
             for _ in as_completed(futures):
                 pass
-    
+
     def _download_single_sra(self, srr_id, sample_id):
         """Download a single SRA file using prefetch"""
         srr_r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
@@ -660,7 +662,7 @@ class SRAWorkflow:
                 except Exception as e:
                     logger.warning(f"Could not remove invalid SRA: {e}")
                 # Continue to re-download below
-        
+
         # Download using prefetch
         logger.info(self._c(f"    → Downloading {srr_id}...", self._C_CYAN))
         log_out = self.logs_dir / f"prefetch_{srr_id}.out.txt"
@@ -717,23 +719,23 @@ class SRAWorkflow:
                         status_file.write_text("DBGaP_REQUIRED")
                     else:
                         logger.error(self._c(f"    ✗ {srr_id} download failed (no .sra or .sralite found)", self._C_RED))
-                        
+
         except Exception as e:
             logger.error(f"Error downloading {srr_id}: {e}")
-    
+
     def convert_sra_to_fastq(self):
         """Step 2: Convert SRA files to FASTQ format"""
         logger.info("=" * 50)
         logger.info(self._c("STEP 2: Convert SRA to FASTQ", self._C_CYAN))
         logger.info("=" * 50)
-        
+
         # Path to the conversion script (submit_fastq_dump_jobs.sh)
         # Use relative path from this script's location for portability
         fdump_script = Path(__file__).parent / "submit_fastq_dump_jobs.sh"
         if not fdump_script.exists():
             logger.error(f"Required script not found: {fdump_script}")
             sys.exit(1)
-        
+
         # Discover any active conversion jobs from previous runs and merge into submitted_jobs
         try:
             self._load_and_discover_active_jobs()
@@ -750,7 +752,7 @@ class SRAWorkflow:
             if self._sample_has_bam(sample_id):
                 logger.info(self._c(f"✓ {sample_id}: BAM exists; skipping SRA->FASTQ conversion", self._C_GREEN))
                 continue
-            
+
             for srr_id in sample_data['srr_ids']:
                 total_srrs += 1
                 srr_r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
@@ -825,7 +827,7 @@ class SRAWorkflow:
                     except subprocess.CalledProcessError as e:
                         logger.error(self._c(f"Failed to submit conversion for {srr_id}: {e}", self._C_RED))
                 # If neither FASTQs nor .sra exist, nothing to do for this SRR
-        
+
         logger.info(self._c(f"Summary: SRRs={total_srrs}, skipped_fastq={skipped_fastq}, skipped_dbgap={skipped_dbgap}, submitted={submitted}", self._C_MAGENTA))
         # Optionally wait for jobs to finish
         if not self.no_wait and jobs_to_wait:
@@ -1171,7 +1173,7 @@ class SRAWorkflow:
             if remaining:
                 time.sleep(self.poll_interval_sec)
         logger.info("All submitted conversion jobs processed.")
-    
+
     # merge_fastq_files disabled: SRR-level FASTQs are final outputs
 
     def _is_sra_safe_to_delete(self, sra_file: Path, srr_id: str) -> tuple:
@@ -1516,7 +1518,15 @@ class SRAWorkflow:
             r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
             r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
             try:
-                if r1.exists() and r2.exists() and r1.stat().st_size > 0 and r2.stat().st_size > 0:
+                # Check if FASTQs are complete: single-ended (R1 only) or paired-end (R1+R2)
+                r1_ok = r1.exists() and r1.stat().st_size > 0
+                r2_exists = r2.exists()
+                r2_ok = r2_exists and r2.stat().st_size > 0
+
+                is_single_ended_ok = r1_ok and not r2_exists
+                is_paired_end_ok = r1_ok and r2_ok
+
+                if is_single_ended_ok or is_paired_end_ok:
                     # Multi-layered safety check before deletion
                     is_safe, reason = self._is_sra_safe_to_delete(sra_file, srr_id)
                     if is_safe:
@@ -1534,7 +1544,7 @@ class SRAWorkflow:
             logger.info(self._c(f"  ℹ No .sra files removed; skipped {skipped_unsafe} file(s) due to safety checks", self._C_CYAN))
         else:
             logger.info(self._c("  ✓ Lightweight cleanup: no .sra files to remove", self._C_GREEN))
-    
+
     def _check_dbgap_required(self, srr_ids):
         """Check if any SRR is marked as requiring dbGaP access."""
         for sid in srr_ids:
@@ -1711,7 +1721,7 @@ class SRAWorkflow:
 
         with open(status_file, 'w') as f:
             f.write("\n".join(lines) + "\n")
-    
+
     def run(self):
         """Execute the complete workflow"""
         logger.info("=" * 50)
@@ -1741,7 +1751,7 @@ class SRAWorkflow:
             pass
         self.convert_sra_to_fastq()
         self.generate_status_report()
-        
+
         logger.info("=" * 50)
         # Minimal colorized completion message for better skimmability
         try:
@@ -1773,14 +1783,14 @@ def main():
     parser.add_argument('cancer_directory', help='Path to cancer directory containing sample_list.txt')
     parser.add_argument('--no-wait', action='store_true', help='Do not wait for conversion jobs; submit and exit')
     parser.add_argument('--prefetch-workers', type=int, default=32, help='Number of parallel workers for SRA prefetch (default: 32)')
-    
+
     args = parser.parse_args()
-    
+
     # Validate directory exists
     if not os.path.isdir(args.cancer_directory):
         logger.error(f"Directory not found: {args.cancer_directory}")
         sys.exit(1)
-    
+
     # Run workflow
     workflow = SRAWorkflow(args.cancer_directory, no_wait=args.no_wait, prefetch_workers=args.prefetch_workers)
     workflow.run()
