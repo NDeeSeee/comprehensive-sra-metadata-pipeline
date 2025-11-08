@@ -255,6 +255,26 @@ class SRAWorkflow:
                 ids.add(cleaned)
         return sorted(list(ids))
 
+    def _find_sra_file(self, srr_id: str) -> Path | None:
+        """Find SRA file for given SRR ID, supporting both .sra and .sralite formats.
+
+        Returns:
+            Path to existing SRA file (.sra or .sralite), or None if neither exists.
+
+        Note: NCBI now often provides .sralite (SRA Lite) files which strip some
+        quality scores to save space but work identically with fastq-dump.
+        """
+        sra_file = self.cancer_dir / f"{srr_id}.sra"
+        sralite_file = self.cancer_dir / f"{srr_id}.sralite"
+
+        # Prefer .sra if both exist (shouldn't happen, but be deterministic)
+        if sra_file.exists():
+            return sra_file
+        elif sralite_file.exists():
+            return sralite_file
+        else:
+            return None
+
     def _validate_sra_file(self, sra_file: Path) -> bool:
         """Validate that an SRA file is not corrupted using vdb-validate.
 
@@ -605,7 +625,6 @@ class SRAWorkflow:
     
     def _download_single_sra(self, srr_id, sample_id):
         """Download a single SRA file using prefetch"""
-        sra_file = self.cancer_dir / f"{srr_id}.sra"
         srr_r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
         srr_r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
 
@@ -625,14 +644,15 @@ class SRAWorkflow:
                 except Exception as e:
                     logger.warning(f"Could not remove invalid FASTQs: {e}")
                 # Continue to download/convert
-        
-        # Skip if SRA file already exists AND is valid
-        if sra_file.exists():
+
+        # Skip if SRA file already exists AND is valid (supports both .sra and .sralite)
+        sra_file = self._find_sra_file(srr_id)
+        if sra_file:
             if self._validate_sra_file(sra_file):
-                logger.info(self._c(f"    ✓ {srr_id}.sra already exists and validated", self._C_GREEN))
+                logger.info(self._c(f"    ✓ {sra_file.name} already exists and validated", self._C_GREEN))
                 return
             else:
-                logger.warning(self._c(f"    ! {srr_id}.sra exists but invalid (corrupted/incomplete)", self._C_YELLOW))
+                logger.warning(self._c(f"    ! {sra_file.name} exists but invalid (corrupted/incomplete)", self._C_YELLOW))
                 logger.warning(self._c(f"    ! Removing invalid SRA and will re-download", self._C_YELLOW))
                 try:
                     sra_file.unlink()
@@ -644,18 +664,19 @@ class SRAWorkflow:
         logger.info(self._c(f"    → Downloading {srr_id}...", self._C_CYAN))
         log_out = self.logs_dir / f"prefetch_{srr_id}.out.txt"
         log_err = self.logs_dir / f"prefetch_{srr_id}.err.txt"
-        
+
         try:
             with open(log_out, 'w') as out, open(log_err, 'w') as err:
                 result = subprocess.run(
                     ['prefetch', srr_id, '-X', '35000000'],
                     stdout=out, stderr=err, cwd=self.cancer_dir
                 )
-            
-            # Move .sra file from subdirectory if created
+
+            # Move SRA file from subdirectory if created (supports both .sra and .sralite)
             srr_dir = self.cancer_dir / srr_id
             if srr_dir.exists():
-                for sra in srr_dir.glob('*.sra'):
+                # Match both .sra and .sralite files
+                for sra in srr_dir.glob('*.sra*'):
                     target = self.cancer_dir / sra.name
                     try:
                         # Check if target already exists
@@ -664,6 +685,7 @@ class SRAWorkflow:
                             sra.unlink()
                         else:
                             sra.rename(target)
+                            logger.debug(f"Moved {sra.name} from subdirectory to main directory")
                     except Exception as e:
                         logger.warning(f"Could not move {sra.name} from subdirectory: {e}")
                 try:
@@ -672,13 +694,14 @@ class SRAWorkflow:
                         srr_dir.rmdir()
                 except Exception as e:
                     logger.debug(f"Could not remove {srr_dir}: {e}")
-            
-            # Check if download succeeded and validate integrity
-            if sra_file.exists():
+
+            # Check if download succeeded and validate integrity (supports both .sra and .sralite)
+            sra_file = self._find_sra_file(srr_id)
+            if sra_file:
                 if self._validate_sra_file(sra_file):
-                    logger.info(self._c(f"    ✓ {srr_id}.sra downloaded and validated successfully", self._C_GREEN))
+                    logger.info(self._c(f"    ✓ {sra_file.name} downloaded and validated successfully", self._C_GREEN))
                 else:
-                    logger.error(self._c(f"    ✗ {srr_id}.sra downloaded but failed validation; removing", self._C_RED))
+                    logger.error(self._c(f"    ✗ {sra_file.name} downloaded but failed validation; removing", self._C_RED))
                     try:
                         sra_file.unlink()
                     except Exception:
@@ -688,11 +711,11 @@ class SRAWorkflow:
                 with open(log_err, 'r') as f:
                     error_content = f.read().lower()
                     if any(x in error_content for x in ['dbgap', 'unauthorized', 'permission denied', '403']):
-                        logger.warning(self._c(f"    ✗ {srr_id}.sra download failed: dbGaP/permission required", self._C_YELLOW))
+                        logger.warning(self._c(f"    ✗ {srr_id} download failed: dbGaP/permission required", self._C_YELLOW))
                         status_file = self.logs_dir / f"prefetch_{srr_id}.status"
                         status_file.write_text("DBGaP_REQUIRED")
                     else:
-                        logger.error(self._c(f"    ✗ {srr_id}.sra download failed", self._C_RED))
+                        logger.error(self._c(f"    ✗ {srr_id} download failed (no .sra or .sralite found)", self._C_RED))
                         
         except Exception as e:
             logger.error(f"Error downloading {srr_id}: {e}")
@@ -729,10 +752,9 @@ class SRAWorkflow:
             
             for srr_id in sample_data['srr_ids']:
                 total_srrs += 1
-                sra_file = self.cancer_dir / f"{srr_id}.sra"
                 srr_r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
                 srr_r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
-                
+
                 # Skip if already converted or if marked as dbGaP
                 status_file = self.logs_dir / f"prefetch_{srr_id}.status"
                 try:
@@ -761,11 +783,13 @@ class SRAWorkflow:
                     jobs_to_wait[srr_id] = prev_job
                     logger.info(self._c(f"→ {srr_id} already running as Job <{prev_job}>; will wait", self._C_CYAN))
                     continue
-                
-                if sra_file.exists():
+
+                # Check if SRA exists (supports both .sra and .sralite formats)
+                sra_file = self._find_sra_file(srr_id)
+                if sra_file:
                     # Validate SRA before submitting conversion job
                     if not self._validate_sra_file(sra_file):
-                        logger.warning(self._c(f"  ! {srr_id}.sra exists but is invalid/corrupted; skipping conversion", self._C_YELLOW))
+                        logger.warning(self._c(f"  ! {sra_file.name} exists but is invalid/corrupted; skipping conversion", self._C_YELLOW))
                         logger.warning(self._c(f"  ! Run script again to re-download this SRA", self._C_YELLOW))
                         # Persist status so generate_status_report can show why conversion didn't happen
                         status_file = self.logs_dir / f"conversion_{srr_id}.status"
@@ -775,7 +799,7 @@ class SRAWorkflow:
                             pass
                         continue
 
-                    logger.info(self._c(f"→ Submitting conversion job for {srr_id}.sra", self._C_CYAN))
+                    logger.info(self._c(f"→ Submitting conversion job for {sra_file.name}", self._C_CYAN))
                     try:
                         # Capture bsub output from submit_fastq_dump_jobs.sh to parse Job ID
                         proc = subprocess.run(
@@ -1049,7 +1073,6 @@ class SRAWorkflow:
             for srr_id, job_id in remaining.items():
                 srr_r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
                 srr_r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
-                sra_file = self.cancer_dir / f"{srr_id}.sra"
 
                 # CRITICAL FIX: Check job status FIRST before validating FASTQs
                 # If job is still running, don't validate yet - files may be incomplete!
@@ -1061,12 +1084,14 @@ class SRAWorkflow:
                         # CRITICAL: Use thorough validation before deleting source SRA
                         is_valid, reason = self._validate_fastq_pair(srr_r1, srr_r2, srr_id, thorough=True)
                         if is_valid:
-                            if sra_file.exists():
+                            # Delete SRA file after successful conversion (supports both .sra and .sralite)
+                            sra_file = self._find_sra_file(srr_id)
+                            if sra_file:
                                 try:
                                     sra_file.unlink()
-                                    logger.info(f"  ✓ Cleaned {srr_id}.sra after successful conversion")
+                                    logger.info(f"  ✓ Cleaned {sra_file.name} after successful conversion")
                                 except Exception as e:
-                                    logger.warning(f"  ! Could not remove {srr_id}.sra: {e}")
+                                    logger.warning(f"  ! Could not remove {sra_file.name}: {e}")
                             finished.append(srr_id)
                         else:
                             logger.warning(self._c(f"  ! {srr_id} job {status} but FASTQs invalid: {reason}; keeping .sra", self._C_YELLOW))
@@ -1272,8 +1297,9 @@ class SRAWorkflow:
         removed = 0
         skipped_unsafe = 0
         for srr_id in sorted(srr_ids):
-            sra_file = self.cancer_dir / f"{srr_id}.sra"
-            if not sra_file.exists():
+            # Find SRA file (supports both .sra and .sralite)
+            sra_file = self._find_sra_file(srr_id)
+            if not sra_file:
                 continue
             r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
             r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
@@ -1289,7 +1315,7 @@ class SRAWorkflow:
                             sra_file.unlink()
                             removed += 1
                     else:
-                        logger.debug(f"Skipping {srr_id}.sra deletion: {reason}")
+                        logger.debug(f"Skipping {sra_file.name} deletion: {reason}")
                         skipped_unsafe += 1
         if removed:
             logger.info(self._c(f"  ✓ Global cleanup removed {removed} converted .sra files", self._C_GREEN))
@@ -1313,7 +1339,6 @@ class SRAWorkflow:
             if not self._sample_has_bam(sample_id):
                 continue
             for srr_id in sample_data['srr_ids']:
-                sra_file = self.cancer_dir / f"{srr_id}.sra"
                 r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
                 r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
 
@@ -1345,8 +1370,10 @@ class SRAWorkflow:
 
                 # Only delete if validation definitively passed
                 if should_delete:
+                    # Delete SRA file (supports both .sra and .sralite)
+                    sra_file = self._find_sra_file(srr_id)
                     with contextlib.suppress(Exception):
-                        if sra_file.exists():
+                        if sra_file:
                             sra_file.unlink()
                             total_sra_removed += 1
                     with contextlib.suppress(Exception):
@@ -1481,8 +1508,9 @@ class SRAWorkflow:
         removed = 0
         skipped_unsafe = 0
         for srr_id in sorted(srr_ids):
-            sra_file = self.cancer_dir / f"{srr_id}.sra"
-            if not sra_file.exists():
+            # Find SRA file (supports both .sra and .sralite)
+            sra_file = self._find_sra_file(srr_id)
+            if not sra_file:
                 continue
             r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
             r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
@@ -1495,7 +1523,7 @@ class SRAWorkflow:
                             sra_file.unlink()
                             removed += 1
                     else:
-                        logger.debug(f"Skipping {srr_id}.sra deletion: {reason}")
+                        logger.debug(f"Skipping {sra_file.name} deletion: {reason}")
                         skipped_unsafe += 1
             except Exception:
                 continue
@@ -1545,7 +1573,6 @@ class SRAWorkflow:
         for sid in srr_ids:
             r1 = self.cancer_dir / f"{sid}_1.fastq.gz"
             r2 = self.cancer_dir / f"{sid}_2.fastq.gz"
-            sra = self.cancer_dir / f"{sid}.sra"
             try:
                 r1_ok = r1.exists() and r1.stat().st_size > 0
                 r2_ok = r2.exists() and r2.stat().st_size > 0
@@ -1555,7 +1582,9 @@ class SRAWorkflow:
             if not (r1_ok and r2_ok):
                 all_fastqs_ok = False
                 any_fastq_missing = True
-                if sra.exists():
+                # Check if SRA exists (supports both .sra and .sralite)
+                sra = self._find_sra_file(sid)
+                if sra:
                     any_sra_present_missing_fastq = True
                 else:
                     any_missing_both = True
