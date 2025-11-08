@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import re
 from pathlib import Path
+from typing import Optional
 from collections import defaultdict
 import gzip
 import shutil
@@ -255,7 +256,7 @@ class SRAWorkflow:
                 ids.add(cleaned)
         return sorted(list(ids))
 
-    def _find_sra_file(self, srr_id: str) -> Path | None:
+    def _find_sra_file(self, srr_id: str) -> Optional[Path]:
         """Find SRA file for given SRR ID, supporting both .sra and .sralite formats.
 
         Returns:
@@ -1563,6 +1564,8 @@ class SRAWorkflow:
     def _analyze_fastq_status(self, srr_ids):
         """Analyze FASTQ file status for all SRRs in a sample.
 
+        Handles both single-ended (R1 only) and paired-end (R1 + R2) layouts.
+
         Returns tuple: (all_fastqs_ok, any_fastq_missing, any_sra_present_missing_fastq, any_missing_both)
         """
         all_fastqs_ok = True
@@ -1575,11 +1578,19 @@ class SRAWorkflow:
             r2 = self.cancer_dir / f"{sid}_2.fastq.gz"
             try:
                 r1_ok = r1.exists() and r1.stat().st_size > 0
-                r2_ok = r2.exists() and r2.stat().st_size > 0
+                r2_exists = r2.exists()
+                r2_ok = r2_exists and r2.stat().st_size > 0
             except OSError:
-                r1_ok = r2_ok = False
+                r1_ok = r2_ok = r2_exists = False
 
-            if not (r1_ok and r2_ok):
+            # Determine if FASTQs are complete:
+            # Single-ended: R1 exists and valid, R2 doesn't exist
+            # Paired-end: Both R1 and R2 exist and valid
+            is_single_ended_ok = r1_ok and not r2_exists
+            is_paired_end_ok = r1_ok and r2_ok
+
+            if not (is_single_ended_ok or is_paired_end_ok):
+                # FASTQs are missing or incomplete
                 all_fastqs_ok = False
                 any_fastq_missing = True
                 # Check if SRA exists (supports both .sra and .sralite)
@@ -1645,7 +1656,11 @@ class SRAWorkflow:
         return 'UNKNOWN'
 
     def generate_status_report(self, log_header: bool = True):
-        """Generate sample status report (4 columns, exact format)."""
+        """Generate sample status report (4 columns, exact format).
+
+        For single-ended data (R2 doesn't exist), R2 column is left empty
+        to avoid misleading downstream tools.
+        """
         if log_header:
             logger.info("=" * 50)
             logger.info("STEP 3: Generate sample status snapshot")
@@ -1656,8 +1671,31 @@ class SRAWorkflow:
 
         for sample_id, sample_data in self.samples.items():
             srr_ids = sample_data['srr_ids']
-            r1_list = ",".join([f"{sid}_1.fastq.gz" for sid in srr_ids])
-            r2_list = ",".join([f"{sid}_2.fastq.gz" for sid in srr_ids])
+
+            # Build R1 and R2 lists, but only include R2 if it actually exists (paired-end)
+            # For single-ended, R2 list will be empty string to avoid confusion
+            r1_entries = []
+            r2_entries = []
+
+            for sid in srr_ids:
+                r1_entries.append(f"{sid}_1.fastq.gz")
+                # Only add R2 if it exists (paired-end) or if we expect it to exist
+                r2_path = self.cancer_dir / f"{sid}_2.fastq.gz"
+                r1_path = self.cancer_dir / f"{sid}_1.fastq.gz"
+
+                # If R1 exists, we can definitively check layout
+                if r1_path.exists():
+                    if r2_path.exists():
+                        # Paired-end: both exist
+                        r2_entries.append(f"{sid}_2.fastq.gz")
+                    # else: Single-ended, don't add R2
+                else:
+                    # FASTQs don't exist yet - assume paired-end (most common)
+                    # This will be corrected on next status update after conversion
+                    r2_entries.append(f"{sid}_2.fastq.gz")
+
+            r1_list = ",".join(r1_entries)
+            r2_list = ",".join(r2_entries) if r2_entries else ""
 
             # Analyze FASTQ status
             all_fastqs_ok, any_fastq_missing, any_sra_present_missing_fastq, any_missing_both = \
