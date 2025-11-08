@@ -158,10 +158,11 @@ submit_from_list() {
   list_dir="$(cd "$(dirname "$sample_list")" && pwd)"
 
   # Submit one job per line; support tab- or whitespace-delimited lines; skip comments/empties
-  while IFS=$'\t' read -r SAMPLE FQ1 FQ2 || [[ -n "${SAMPLE}" ]]; do
+  # Read up to 4 columns (SAMPLE, R1, R2, STATUS). STATUS is ignored.
+  while IFS=$'\t' read -r SAMPLE FQ1 FQ2 _STATUS || [[ -n "${SAMPLE}" ]]; do
     if [[ -z "${FQ1:-}" ]]; then
       # Fallback: split by whitespace if tabs not used
-      read -r SAMPLE FQ1 FQ2 <<<"${SAMPLE}"
+      read -r SAMPLE FQ1 FQ2 _STATUS <<<"${SAMPLE}"
       [[ -z "${FQ1:-}" ]] && continue
     fi
     [[ -z "${SAMPLE}" ]] && continue
