@@ -399,7 +399,7 @@ def _stable_unique_tokens_csv(val: str):
     return tokens
 
 # Aggregate multi-SRR per BioSample on a single row with comma-separated R1/R2
-with open(out_path, 'w', newline='') as out_f:
+    with open(out_path, 'w', newline='') as out_f:
     writer = csv.writer(out_f, delimiter='\t', lineterminator='\n')
     for row in base_rows:
         biosample = (row.get('BioSample') or '').strip()
@@ -408,7 +408,8 @@ with open(out_path, 'w', newline='') as out_f:
         r1_list = _stable_unique_tokens_csv(row.get('R1', '') or '')
         r2_list = _stable_unique_tokens_csv(row.get('R2', '') or '')
         r1 = ','.join(r1_list)
-        r2 = ','.join(r2_list)
+        # If no R2 tokens, mark as single-end explicitly
+        r2 = ','.join(r2_list) if r2_list else 'NA'
         writer.writerow([biosample, r1, r2])
 
 print(f"Merged sheet(s) -> {out_path}")

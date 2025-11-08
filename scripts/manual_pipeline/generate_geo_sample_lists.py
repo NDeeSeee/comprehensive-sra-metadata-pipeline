@@ -7,7 +7,7 @@ import os
 import sys
 import argparse
 from collections import defaultdict
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
 
 import pandas as pd
 import subprocess
@@ -71,6 +71,7 @@ def process_dataframe(df: pd.DataFrame, sheet_name: str, cancer_type: str) -> No
         return
 
     mapping = defaultdict(lambda: {"srr_ids": [], "fastq_read1": [], "fastq_read2": []})
+    layout_cache: Dict[str, str] = {}
 
     for _, row in df.iterrows():
         biosample_raw = row.get(biosample_column)
@@ -84,16 +85,16 @@ def process_dataframe(df: pd.DataFrame, sheet_name: str, cancer_type: str) -> No
         if not biosample_id or not srr_id:
             continue
 
+        # Determine library layout (PAIRED or SINGLE)
+        layout = _resolve_layout_for_run(srr_id, layout_cache)
         fastq_r1 = f"{srr_id}_1.fastq.gz"
-        fastq_r2 = f"{srr_id}_2.fastq.gz"
-        sra_file = f"{srr_id}.sra"
-
         # Avoid duplicate SRR entries per BioSample
         entry = mapping[biosample_id]
         if srr_id not in entry["srr_ids"]:
             entry["srr_ids"].append(srr_id)
             entry["fastq_read1"].append(fastq_r1)
-            entry["fastq_read2"].append(fastq_r2)
+            if layout == "PAIRED":
+                entry["fastq_read2"].append(f"{srr_id}_2.fastq.gz")
 
     # Prepare output directory and write results
     output_dir = os.path.join(POSEIDON_DIR, sheet_name, cancer_type)
@@ -114,7 +115,7 @@ def process_dataframe(df: pd.DataFrame, sheet_name: str, cancer_type: str) -> No
             r1_list = _stable_unique(info["fastq_read1"])
             r2_list = _stable_unique(info["fastq_read2"])
             fastq_read1_joined = ",".join(r1_list)
-            fastq_read2_joined = ",".join(r2_list)
+            fastq_read2_joined = ",".join(r2_list) if r2_list else "NA"
             fh.write(f"{biosample_id}\t{fastq_read1_joined}\t{fastq_read2_joined}\n")
 
     # Optional console output for traceability
@@ -180,7 +181,8 @@ def _write_sample_list(
     with open(output_file, "w") as fh:
         for sample_id, info in mapping.items():
             fastq_read1_joined = ",".join(info["fastq_read1"]) if info["fastq_read1"] else ""
-            fastq_read2_joined = ",".join(info["fastq_read2"]) if info["fastq_read2"] else ""
+            # If no R2 entries, write 'NA' for single-end consistency
+            fastq_read2_joined = ",".join(info["fastq_read2"]) if info["fastq_read2"] else "NA"
             fh.write(f"{sample_id}\t{fastq_read1_joined}\t{fastq_read2_joined}\n")
     return output_file
 
@@ -282,19 +284,22 @@ def process_srr_txt(file_path: str, cancer_type: str, output_dir_override: Optio
     print(f"Resolving BioSample accessions for {len(srr_ids)} SRRs...", flush=True)
     print("Press Ctrl-C to stop early; partial output will be written.", flush=True)
     # Group SRRs by BioSample when available; fallback to SRR as its own sample_id
-    mapping = {}
+    mapping: Dict[str, Dict[str, List[str]]] = {}
+    layout_cache: Dict[str, str] = {}
     try:
         for idx, srr in enumerate(srr_ids, start=1):
             print(f"  [{idx}/{len(srr_ids)}] {srr}", flush=True)
             biosample = _resolve_biosample_for_srr(srr)
             sample_id = biosample if biosample else srr
             entry = mapping.setdefault(sample_id, {"fastq_read1": [], "fastq_read2": []})
+            layout = _resolve_layout_for_run(srr, layout_cache)
             r1 = f"{srr}_1.fastq.gz"
-            r2 = f"{srr}_2.fastq.gz"
             if r1 not in entry["fastq_read1"]:
                 entry["fastq_read1"].append(r1)
-            if r2 not in entry["fastq_read2"]:
-                entry["fastq_read2"].append(r2)
+            if layout == "PAIRED":
+                r2 = f"{srr}_2.fastq.gz"
+                if r2 not in entry["fastq_read2"]:
+                    entry["fastq_read2"].append(r2)
     except KeyboardInterrupt:
         print("Interrupted by user. Writing partial sample_list.txt...", flush=True)
 
@@ -310,6 +315,63 @@ def process_srr_txt(file_path: str, cancer_type: str, output_dir_override: Optio
         srrs = sorted({p.split("_")[0] for p in info["fastq_read1"]})
         print(f"Sample: {sample_id} -> Associated SRR IDs: {', '.join(srrs)}")
     print(f"Wrote {len(mapping)} rows to: {out_path}")
+
+# --- Helpers to resolve library layout ---
+def _resolve_layout_for_run(run_id: str, cache: Dict[str, str]) -> str:
+    """Return 'PAIRED' or 'SINGLE' for a run accession using ENA/Entrez. Caches results."""
+    if run_id in cache:
+        return cache[run_id]
+    layout = _query_layout_via_ena(run_id)
+    if not layout:
+        layout = _query_layout_via_entrez(run_id)
+    if layout not in {"PAIRED", "SINGLE"}:
+        layout = "PAIRED"
+    cache[run_id] = layout
+    return layout
+
+def _query_layout_via_ena(run_id: str) -> Optional[str]:
+    try:
+        url = (
+            "https://www.ebi.ac.uk/ena/portal/api/filereport?"
+            f"accession={run_id}&result=read_run&fields=run_accession,library_layout&format=tsv"
+        )
+        with urlrequest.urlopen(url, timeout=6) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+        lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+        if len(lines) >= 2:
+            header = lines[0].split("\t")
+            row = lines[1].split("\t")
+            if "library_layout" in header:
+                idx = header.index("library_layout")
+                val = row[idx].strip().upper()
+                if val:
+                    return val
+    except (urlerror.URLError, TimeoutError, Exception):
+        return None
+    return None
+
+def _query_layout_via_entrez(run_id: str) -> Optional[str]:
+    try:
+        # esearch+efetch runinfo returns CSV with LibraryLayout column
+        cmd = f'esearch -db sra -query "{run_id}" | efetch -format runinfo'
+        proc = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+        if proc.returncode != 0 or not proc.stdout:
+            return None
+        import csv as _csv
+        for row in _csv.DictReader(proc.stdout.splitlines()):
+            if (row.get("Run") or "").strip() == run_id:
+                val = (row.get("LibraryLayout") or "").strip().upper()
+                if val:
+                    return val
+        # Fallback: take first row
+        rows = list(_csv.DictReader(proc.stdout.splitlines()))
+        if rows:
+            val = (rows[0].get("LibraryLayout") or "").strip().upper()
+            if val:
+                return val
+    except Exception:
+        return None
+    return None
 
 if input_ext in {".xlsx", ".xls"}:
     # Expected sheet names to iterate
