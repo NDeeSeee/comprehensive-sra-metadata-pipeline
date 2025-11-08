@@ -1455,21 +1455,29 @@ class SRAWorkflow:
                         # Use thorough=True to catch all corruption before deleting source data
                         is_valid, reason = self._validate_fastq_pair(r1, r2, srr_id, thorough=True)
                         if not is_valid:
-                            logger.error(self._c(
-                                f"  ✗ {sample_id}/{srr_id}: BAM exists but FASTQ corrupted: {reason}",
-                                self._C_RED
-                            ))
-                            logger.error(self._c(
-                                f"  ✗ PRESERVING corrupted FASTQ and SRA for investigation!",
-                                self._C_RED
-                            ))
-                            logger.error(self._c(
-                                f"  ✗ BAM may be invalid - recommend re-validating or re-running alignment",
-                                self._C_RED
-                            ))
-                            corrupted_detected.append(srr_id)
-                            corrupted_preserved.append((sample_id, srr_id, reason))
-                            should_delete = False  # CRITICAL: Don't delete corrupted data
+                            # CRITICAL: Distinguish between "job still running" and actual corruption
+                            # "LSF job still running" means validation was skipped to avoid race condition
+                            # This is NOT corruption - just can't validate yet, skip cleanup
+                            if "LSF job still running" in reason or "RUN/PEND" in reason:
+                                logger.debug(f"  ℹ {sample_id}/{srr_id}: Skipping cleanup - conversion job still active")
+                                should_delete = False  # Skip cleanup, job still writing
+                            else:
+                                # Real corruption detected - preserve files and warn user
+                                logger.error(self._c(
+                                    f"  ✗ {sample_id}/{srr_id}: BAM exists but FASTQ corrupted: {reason}",
+                                    self._C_RED
+                                ))
+                                logger.error(self._c(
+                                    f"  ✗ PRESERVING corrupted FASTQ and SRA for investigation!",
+                                    self._C_RED
+                                ))
+                                logger.error(self._c(
+                                    f"  ✗ BAM may be invalid - recommend re-validating or re-running alignment",
+                                    self._C_RED
+                                ))
+                                corrupted_detected.append(srr_id)
+                                corrupted_preserved.append((sample_id, srr_id, reason))
+                                should_delete = False  # CRITICAL: Don't delete corrupted data
                     except Exception as e:
                         logger.warning(f"FASTQ validation failed for {srr_id}: {e}; skipping deletion to be safe")
                         should_delete = False
