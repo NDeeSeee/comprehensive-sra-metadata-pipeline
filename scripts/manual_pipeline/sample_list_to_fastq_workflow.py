@@ -446,13 +446,6 @@ class SRAWorkflow:
             except OSError as e:
                 return False, f"{id_str}Cannot stat {label}: {e}"
 
-        # For paired-end, file sizes should be similar (within 20%)
-        # This is a fast check before expensive read counting
-        if not thorough and r1_size > 0 and r2_size > 0:
-            size_ratio = max(r1_size, r2_size) / min(r1_size, r2_size)
-            if size_ratio > 1.2:  # More than 20% difference
-                return False, f"{id_str}File size mismatch: R1={r1_size/1024/1024:.1f}MB, R2={r2_size/1024/1024:.1f}MB (ratio={size_ratio:.2f})"
-
         # Check gzip integrity (handles both files together)
         gzip_valid, gzip_timeout = self._gzip_test(r1_path, r2_path)
         if gzip_timeout:
