@@ -1178,11 +1178,12 @@ class SRAWorkflow:
                 # else still running (e.g., RUN, PEND)
                 else:
                     # Detect stuck jobs: if status stays non-terminal for many cycles, break out with warning
-                    # TIMEOUT: 6 hours for large SRA files (2-3 GB files can take 4-6 hours on slow network storage)
+                    # TIMEOUT: 80 hours for very large SRA files (20 GB files can take 40-60 hours on slow network storage)
+                    # LSF job limit is 72 hours, so monitor for 80 hours to ensure we capture completion
                     cycles = self.job_poll_cycles.get(srr_id, 0) + 1
                     self.job_poll_cycles[srr_id] = cycles
-                    # Calculate max cycles for 6 hours based on actual poll interval
-                    max_cycles_for_timeout = max(30, int(21600 / self.poll_interval_sec))  # 21600s = 6 hours
+                    # Calculate max cycles for 80 hours based on actual poll interval
+                    max_cycles_for_timeout = max(30, int(288000 / self.poll_interval_sec))  # 288000s = 80 hours
                     elapsed_seconds = cycles * self.poll_interval_sec
                     elapsed_hours = elapsed_seconds / 3600
                     if cycles >= max_cycles_for_timeout:

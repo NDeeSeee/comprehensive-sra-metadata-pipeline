@@ -89,7 +89,7 @@ if [ "$INPUT" = "sample_list.txt" ] || [ "$(basename "$INPUT")" = "sample_list.t
         # Submit LSF job for this SRR
         bsub <<EOF
 #BSUB -L /bin/bash
-#BSUB -W 10:00
+#BSUB -W 72:00
 #BSUB -n 1
 #BSUB -M 32000
 #BSUB -e "$DIR/logs/${SRR_ID}_fastqdump.err.txt"
@@ -183,7 +183,7 @@ else
     
     bsub <<EOF
 #BSUB -L /bin/bash
-#BSUB -W 10:00
+#BSUB -W 72:00
 #BSUB -n 1
 #BSUB -M 32000
 #BSUB -e "$DIR/logs/${SAMPLE}_fastqdump.err.txt"
