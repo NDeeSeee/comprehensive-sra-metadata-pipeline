@@ -185,9 +185,42 @@ submit_from_list() {
   mkdir -p bams logs
   local list_dir
   list_dir="$(cd "$(dirname "$sample_list")" && pwd)"
+  local wait_interval
+  wait_interval=${STAR_WAIT_INTERVAL_SEC:-60}
+
+  # Helper: fetch current columns for a sample from the status file
+  _read_sample_fields() {
+    local sfile="$1" sid="$2"
+    awk -v s="$2" 'BEGIN{FS=OFS="\t"} $1==s {print $2"\t"$3"\t"$4; exit}' "$1"
+  }
+
+  # Helper: wait until FASTQ_DONE, or skip on DBGaP_REQUIRED; returns 0 when done, 1 to skip
+  _wait_for_fastq_done() {
+    local sfile="$1" sid="$2"
+    while true; do
+      local line
+      line="$(_read_sample_fields "$sfile" "$sid")"
+      # If not found or no status col, proceed immediately
+      if [[ -z "$line" ]]; then
+        echo "${sid}: no status info; proceeding"
+        return 0
+      fi
+      local r1 r2 st
+      IFS=$'\t' read -r r1 r2 st <<<"$line"
+      if [[ "$st" == "FASTQ_DONE" ]]; then
+        return 0
+      fi
+      if [[ "$st" == "DBGaP_REQUIRED" ]]; then
+        echo "${sid}: DBGaP_REQUIRED; skipping"
+        return 1
+      fi
+      echo "${sid}: waiting for FASTQ_DONE (current=${st:-unknown})..."
+      sleep "$wait_interval"
+    done
+  }
 
   # Submit one job per line; support tab- or whitespace-delimited lines; skip comments/empties
-  # Read up to 4 columns (SAMPLE, R1, R2, STATUS). STATUS is ignored.
+  # Read up to 4 columns (SAMPLE, R1, R2, STATUS). STATUS may be used to gate submission.
   while IFS=$'\t' read -r SAMPLE FQ1 FQ2 _STATUS || [[ -n "${SAMPLE}" ]]; do
     if [[ -z "${FQ1:-}" ]]; then
       # Fallback: split by whitespace if tabs not used
@@ -197,13 +230,20 @@ submit_from_list() {
     [[ -z "${SAMPLE}" ]] && continue
     [[ "${SAMPLE}" =~ ^# ]] && continue
 
-    # Respect status column when present: only submit FASTQ_DONE
-    if [[ -n "${_STATUS:-}" && "${_STATUS}" != "FASTQ_DONE" ]]; then
-      echo "Skip ${SAMPLE}: status=${_STATUS}" >&2
+    # If status file has statuses, wait for FASTQ_DONE; skip DBGaP_REQUIRED
+    if ! _wait_for_fastq_done "$sample_list" "$SAMPLE"; then
       continue
     fi
 
-    echo "Submit ${SAMPLE}: status=${_STATUS:-N/A}"
+    # Re-read the latest R1/R2 fields right before submission (they may have changed)
+    {
+      latest_line="$(_read_sample_fields "$sample_list" "$SAMPLE")"
+      if [[ -n "$latest_line" ]]; then
+        IFS=$'\t' read -r FQ1 FQ2 _STATUS <<<"$latest_line"
+      fi
+    }
+
+    echo "Submit ${SAMPLE}: status=FASTQ_DONE"
 
     # Submit; the run mode will validate file existence and pairedness. Pass status file via env
     STAR_STATUS_FILE="${sample_list}" \
