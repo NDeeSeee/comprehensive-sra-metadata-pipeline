@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import sys
+import csv
 from collections import defaultdict
 
 # Default project root; allow override via CLI arg or POSEIDON_DIR env var
@@ -175,25 +176,14 @@ def main():
         action_required = compute_action_required(has_sample_list, has_status, acc)
         per_dir_stats[dir_path] = (cancer_label(dir_path, root), action_required, acc)
 
-    # Build Markdown table content
-    header = "| " + " | ".join(essential_cols) + " |"
-    # Left-align the first two columns (labels), right-align numeric columns
-    sep_cells = []
-    for idx, _ in enumerate(essential_cols):
-        if idx < 2:
-            sep_cells.append(":---")
-        else:
-            sep_cells.append("---:")
-    separator = "| " + " | ".join(sep_cells) + " |"
-    lines = [header, separator]
-
+    # Prepare rows in a common structure
+    rows = []
     for dir_path in sorted(per_dir_stats.keys(), key=lambda p: cancer_label(p, root)):
         label, action_required, acc = per_dir_stats[dir_path]
         if action_required.startswith("RUN "):
-            # Replace numeric columns with None for RUN actions to avoid misleading zeros
-            cells = [label, action_required] + ["None"] * 8
+            row = [label, action_required] + [""] * 8
         else:
-            cells = [
+            row = [
                 label,
                 action_required,
                 str(acc.get("expected", 0)),
@@ -205,14 +195,25 @@ def main():
                 str(acc.get("fastq_done", 0)),
                 str(acc.get("bam_done", 0)),
             ]
-        lines.append("| " + " | ".join(cells) + " |")
+        rows.append(row)
 
-    # Ensure output directory exists and write the table (.md)
+    # Write CSV if requested, otherwise write Markdown for backward compatibility
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+    if out_path.lower().endswith(".csv"):
+        with open(out_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(essential_cols)
+            writer.writerows(rows)
+    else:
+        header = "| " + " | ".join(essential_cols) + " |"
+        sep_cells = [":---" if i < 2 else "---:" for i in range(len(essential_cols))]
+        separator = "| " + " | ".join(sep_cells) + " |"
+        lines = [header, separator]
+        for cells in rows:
+            lines.append("| " + " | ".join(cells) + " |")
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
 
-    # Also print path to the saved table
     print(out_path)
 
 

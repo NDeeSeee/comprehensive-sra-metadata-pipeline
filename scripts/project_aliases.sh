@@ -441,9 +441,21 @@ fastq-workflow() {
 }
 
 overall-status() {
-  # Compute overall pipeline status table
-  # Usage: overall-status [root_dir] [out_md]
-  python3 "${POSEIDON_MANUAL_DIR}/compute_overall_status.py" "$@"
+  # Compute overall pipeline status table as CSV
+  # Usage: overall-status [root_dir] [out_csv]
+  local root
+  local out
+  if [ -n "$1" ]; then
+    root="$1"
+  else
+    root="${POSEIDON_DIR}"
+  fi
+  if [ -n "$2" ]; then
+    out="$2"
+  else
+    out="${root}/Master_Project/overall_status.csv"
+  fi
+  python3 "${POSEIDON_MANUAL_DIR}/compute_overall_status.py" "$root" "$out"
 }
 
 # Convenience wrapper for the parallel batch runner over Controls/Tumors/Premalignant
@@ -492,8 +504,8 @@ Project commands (source scripts/project_aliases.sh first):
   HINT: Before running: conda activate sra-metadata
 
 - overall-status [root_dir] [out_md]
-  Description: Compute a markdown table summarizing pipeline status across directories.
-  Run from: anywhere (defaults to project ROOT inside script)
+  Description: Compute a CSV table summarizing pipeline status across directories.
+  Run from: anywhere (defaults to POSEIDON_DIR and writes overall_status.csv)
   Example: overall-status
 
 - run_fastq_workflows [options]
