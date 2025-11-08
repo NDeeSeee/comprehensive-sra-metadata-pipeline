@@ -37,27 +37,64 @@ run_one_sample() {
     fi
   fi
 
-  if [[ ! -f "$fq1" ]]; then
-    echo "FASTQ1 not found: $fq1" >&2
+  # Support comma-separated lists of FASTQs (from sample_list.with_status.txt)
+  IFS=',' read -r -a fq1_list <<<"$fq1"
+  # Trim whitespace tokens
+  local cleaned_fq1_list=()
+  for t in "${fq1_list[@]}"; do
+    t="${t##[[:space:]]}"
+    t="${t%%[[:space:]]}"
+    [[ -n "$t" ]] && cleaned_fq1_list+=("$t")
+  done
+
+  local is_paired=0
+  local cleaned_fq2_list=()
+  if [[ -n "$fq2" ]]; then
+    IFS=',' read -r -a fq2_list <<<"$fq2"
+    for t in "${fq2_list[@]}"; do
+      t="${t##[[:space:]]}"
+      t="${t%%[[:space:]]}"
+      [[ -n "$t" ]] && cleaned_fq2_list+=("$t")
+    done
+    if (( ${#cleaned_fq2_list[@]} > 0 )); then
+      is_paired=1
+    fi
+  fi
+
+  # Validate file lists and existence
+  if (( ${#cleaned_fq1_list[@]} == 0 )); then
+    echo "FASTQ1 list is empty for sample ${sample}" >&2
     exit 2
   fi
-  local is_paired=0
-  if [[ -n "$fq2" ]]; then
-    if [[ ! -f "$fq2" ]]; then
-      echo "FASTQ2 provided but not found: $fq2" >&2
-      exit 3
-    fi
-    is_paired=1
+  if (( is_paired )) && (( ${#cleaned_fq2_list[@]} != ${#cleaned_fq1_list[@]} )); then
+    echo "Mismatched R1/R2 counts for ${sample}: R1=${#cleaned_fq1_list[@]} R2=${#cleaned_fq2_list[@]}" >&2
+    exit 3
   fi
+  local i
+  for (( i=0; i<${#cleaned_fq1_list[@]}; i++ )); do
+    local p1="${cleaned_fq1_list[$i]}"
+    if [[ ! -f "$p1" ]]; then
+      echo "FASTQ1 not found: $p1" >&2
+      exit 2
+    fi
+    if (( is_paired )); then
+      local p2="${cleaned_fq2_list[$i]}"
+      if [[ ! -f "$p2" ]]; then
+        echo "FASTQ2 not found: $p2" >&2
+        exit 3
+      fi
+    fi
+  done
 
   echo "Running STAR 2-pass for sample: ${sample} ($([[ $is_paired -eq 1 ]] && echo paired-end || echo single-end))"
 
-  # Build read arguments
+  # Build read arguments; STAR expects multiple files as separate args
   local -a reads_args
-  if [[ $is_paired -eq 1 ]]; then
-    reads_args=("$fq1" "$fq2")
+  if (( is_paired )); then
+    # Interleave mates by STAR convention: all R1 then all R2
+    reads_args=("${cleaned_fq1_list[@]}" "${cleaned_fq2_list[@]}")
   else
-    reads_args=("$fq1")
+    reads_args=("${cleaned_fq1_list[@]}")
   fi
 
   # Use decompression only for gzip-compressed inputs
@@ -86,7 +123,12 @@ run_one_sample() {
     --sjdbOverhang 100
   )
 
-  if [[ "$fq1" == *.gz ]] || ([[ $is_paired -eq 1 ]] && [[ "$fq2" == *.gz ]]); then
+  # Determine compression: enable gz decompression only if ALL files end with .gz
+  local all_gz=1
+  for f in "${reads_args[@]}"; do
+    [[ "$f" == *.gz ]] || { all_gz=0; break; }
+  done
+  if (( all_gz )); then
     star_cmd+=( --readFilesCommand "gunzip -c" )
   fi
 
@@ -112,6 +154,8 @@ submit_from_list() {
     exit 1
   fi
   mkdir -p bams logs
+  local list_dir
+  list_dir="$(cd "$(dirname "$sample_list")" && pwd)"
 
   # Submit one job per line; support tab- or whitespace-delimited lines; skip comments/empties
   while IFS=$'\t' read -r SAMPLE FQ1 FQ2 || [[ -n "${SAMPLE}" ]]; do
@@ -129,6 +173,7 @@ submit_from_list() {
          -J "align_${SAMPLE}" \
          -o "logs/STAR2pass_${SAMPLE}.out" \
          -e "logs/STAR2pass_${SAMPLE}.err" \
+         -cwd "${list_dir}" \
          "$0" "${SAMPLE}" "${FQ1}" ${FQ2:+"${FQ2}"}
   done < "$sample_list"
 }
