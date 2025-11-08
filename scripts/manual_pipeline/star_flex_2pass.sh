@@ -41,7 +41,7 @@ run_one_sample() {
   if [[ -e "$final_bam" ]]; then
     if [[ -s "$final_bam" ]]; then
       echo "Output BAM already exists and is non-empty: $final_bam — skipping."
-      update_status "BAM_IS_DONE"
+      update_status "BAM_DONE"
       return 0
     else
       echo "Zero-size BAM detected at $final_bam — removing and recalculating."
@@ -161,7 +161,7 @@ run_one_sample() {
 
   # Validate final BAM and set status accordingly
   if [[ -s "${root_dir}/bams/${sample}.bam" ]]; then
-    update_status "BAM_IS_DONE"
+    update_status "BAM_DONE"
   else
     echo "Alignment finished but BAM missing or zero-size for ${sample}" >&2
     update_status "BAM_ERROR"
@@ -197,8 +197,8 @@ submit_from_list() {
     [[ -z "${SAMPLE}" ]] && continue
     [[ "${SAMPLE}" =~ ^# ]] && continue
 
-    # Respect status column when present: only submit FASTQ_IS_DONE
-    if [[ -n "${_STATUS:-}" && "${_STATUS}" != "FASTQ_IS_DONE" ]]; then
+    # Respect status column when present: only submit FASTQ_DONE
+    if [[ -n "${_STATUS:-}" && "${_STATUS}" != "FASTQ_DONE" ]]; then
       echo "Skip ${SAMPLE}: status=${_STATUS}" >&2
       continue
     fi
