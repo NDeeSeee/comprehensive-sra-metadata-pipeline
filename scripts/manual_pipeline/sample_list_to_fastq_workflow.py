@@ -1407,6 +1407,71 @@ class SRAWorkflow:
                 self._C_RED
             ))
 
+    def _log_removed_zero_bams(self, removed_bam_filenames):
+        """Append removed BAM sample IDs to bams/removed_zero_bams.txt with deduplication.
+
+        Args:
+            removed_bam_filenames: List of BAM filenames (with .bam extension)
+
+        Creates/updates: bams/removed_zero_bams.txt or bams1/removed_zero_bams.txt
+        Format: One sample ID per line (SAMN12345, SAME67890, SRR12345, etc.)
+        """
+        if not removed_bam_filenames:
+            return  # Nothing to log
+
+        # Find bams directory (try bams/ first, then bams1/)
+        log_dir = None
+        if (self.cancer_dir / 'bams').is_dir():
+            log_dir = self.cancer_dir / 'bams'
+        elif (self.cancer_dir / 'bams1').is_dir():
+            log_dir = self.cancer_dir / 'bams1'
+
+        if not log_dir:
+            return  # No bams directory exists, skip logging
+
+        log_file = log_dir / 'removed_zero_bams.txt'
+
+        # Read existing sample IDs from file (handles both log format and clean format)
+        sample_ids = set()
+        if log_file.exists():
+            try:
+                with log_file.open('r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+
+                        # Extract sample ID from log format: "...FILENAME.bam..."
+                        # Regex: capture any non-whitespace/non-slash before .bam
+                        match = re.search(r'([^\s/]+)\.bam', line)
+                        if match:
+                            sample_ids.add(match.group(1))
+                        elif not line.startswith('#'):  # Clean format (not a comment)
+                            # Line is already just the sample ID
+                            sample_ids.add(line)
+            except Exception as e:
+                logger.warning(f"Could not read existing {log_file.name}: {e}")
+
+        # Add new sample IDs from removed BAMs
+        for bam_filename in removed_bam_filenames:
+            # Extract sample ID: SAMN06971639.bam → SAMN06971639
+            sample_id = Path(bam_filename).stem
+            sample_ids.add(sample_id)
+
+        if not sample_ids:
+            return  # Nothing to write
+
+        # Write atomically with deduplication
+        try:
+            temp_file = log_file.with_suffix('.tmp')
+            with temp_file.open('w') as f:
+                for sample_id in sorted(sample_ids):
+                    f.write(f"{sample_id}\n")
+            temp_file.replace(log_file)
+            logger.debug(f"Updated {log_file.name} with {len(sample_ids)} total entries")
+        except Exception as e:
+            logger.warning(f"Could not update {log_file.name}: {e}")
+
     def cleanup_invalid_bam_files(self):
         """Detect and remove 0-byte or otherwise invalid BAM files.
 
@@ -1416,12 +1481,16 @@ class SRAWorkflow:
         This runs early in the workflow to clean up artifacts from previous failed runs.
         """
         removed_bams = []
+        removed_bam_filenames = []  # Track filenames for logging
 
-        # Check both root directory and bams/ subdirectory
+        # Check root directory and bams/ or bams1/ subdirectory
         search_dirs = [self.cancer_dir]
         bams_subdir = self.cancer_dir / 'bams'
+        bams1_subdir = self.cancer_dir / 'bams1'
         if bams_subdir.is_dir():
             search_dirs.append(bams_subdir)
+        if bams1_subdir.is_dir():
+            search_dirs.append(bams1_subdir)
 
         for search_dir in search_dirs:
             try:
@@ -1436,6 +1505,7 @@ class SRAWorkflow:
                         if size == 0:
                             bam_file.unlink()
                             removed_bams.append((bam_file.name, 'empty'))
+                            removed_bam_filenames.append(bam_file.name)
                             logger.warning(self._c(
                                 f"  ✗ Removed 0-byte BAM: {bam_file.name}",
                                 self._C_YELLOW
@@ -1443,6 +1513,7 @@ class SRAWorkflow:
                         elif size < 1024:  # Less than 1KB
                             bam_file.unlink()
                             removed_bams.append((bam_file.name, f'{size}B'))
+                            removed_bam_filenames.append(bam_file.name)
                             logger.warning(self._c(
                                 f"  ✗ Removed invalid BAM ({size}B): {bam_file.name}",
                                 self._C_YELLOW
@@ -1463,6 +1534,8 @@ class SRAWorkflow:
                 f"  ℹ These samples will be re-processed to generate valid BAMs",
                 self._C_CYAN
             ))
+            # Log removed BAM sample IDs to bams/removed_zero_bams.txt
+            self._log_removed_zero_bams(removed_bam_filenames)
 
         return len(removed_bams)
 
