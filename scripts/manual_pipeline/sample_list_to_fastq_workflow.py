@@ -1123,7 +1123,25 @@ class SRAWorkflow:
                 status = self._bjobs_status(job_id)
                 # Treat common terminal/unknown states as finished
                 if status in ('DONE', 'EXIT', 'ZOMBIE', 'ZOMBI', 'UNKNOWN', 'UNKWN'):
-                    # Check outputs regardless of status (handles both single-end and paired-end)
+                    # CRITICAL: NFS filesystem delay - files may not be visible immediately after job completion
+                    # Network filesystems buffer writes and can take 10-60s to propagate files
+                    # Retry with delays before declaring FASTQs truly missing
+                    max_retries = 6  # 6 retries = up to 60 seconds total
+                    retry_delay = 10  # seconds between retries
+
+                    for attempt in range(max_retries):
+                        if srr_r1.exists():
+                            break  # File appeared, exit retry loop
+                        if attempt < max_retries - 1:
+                            # File not visible yet, wait for NFS to flush
+                            logger.info(self._c(
+                                f"  ⏳ {srr_id} job {status} but FASTQ not visible yet; "
+                                f"waiting {retry_delay}s for NFS flush (attempt {attempt+1}/{max_retries})",
+                                self._C_CYAN
+                            ))
+                            time.sleep(retry_delay)
+
+                    # Check outputs after NFS retry loop (handles both single-end and paired-end)
                     if srr_r1.exists():
                         # CRITICAL: Use thorough validation before deleting source SRA
                         is_valid, reason = self._validate_fastq_pair(srr_r1, srr_r2, srr_id, thorough=True)
