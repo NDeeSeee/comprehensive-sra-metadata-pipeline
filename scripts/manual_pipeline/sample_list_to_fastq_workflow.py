@@ -675,6 +675,13 @@ class SRAWorkflow:
                 return
             else:
                 logger.warning(self._c(f"    ! {srr_id} FASTQs exist but invalid: {reason}", self._C_YELLOW))
+
+                # CRITICAL: Don't remove FASTQs if validation was skipped (job still running)
+                # Only remove FASTQs if they're actually corrupted/invalid
+                if "LSF job still running" in reason or "RUN/PEND" in reason:
+                    logger.info(f"    ℹ Skipping removal - conversion job still active")
+                    return  # Don't remove, don't re-download
+
                 logger.warning(self._c(f"    ! Removing invalid FASTQs and will reprocess", self._C_YELLOW))
                 # Remove invalid files so they can be regenerated
                 try:
