@@ -4,6 +4,24 @@
 
 # Resolve project root based on this file's location
 _project_aliases_resolve_root() {
+  # Determine the absolute path of this file in a way that works in both bash and zsh
+  local src
+  if [ -n "$BASH_SOURCE" ]; then
+    src="${BASH_SOURCE[0]}"
+  elif [ -n "$ZSH_VERSION" ]; then
+    # Use zsh-specific expansion inside eval to avoid bash parse errors
+    eval 'src="${(%):-%x}"'
+  else
+    src="$0"
+  fi
+
+  # Resolve directory of this script (follow symlinks when possible)
+  local script_path
+  if command -v readlink >/dev/null 2>&1; then
+    script_path="$(readlink -f "$src" 2>/dev/null || echo "$src")"
+  else
+    script_path="$src"
+  fi
   local this_dir
   this_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   echo "$(cd "${this_dir}/.." && pwd)"

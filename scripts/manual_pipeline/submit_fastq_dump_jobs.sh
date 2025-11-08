@@ -73,13 +73,18 @@ if [ "$INPUT" = "sample_list.txt" ] || [ "$(basename "$INPUT")" = "sample_list.t
             fi
         fi
         
-        # Check if SRA file exists
-        if [ ! -f "${SRR_ID}.sra" ]; then
-            echo "✗ ${SRR_ID}.sra not found, skipping"
+        # Check if SRA file exists (supports both .sra and .sralite formats)
+        SRA_FILE=""
+        if [ -f "${SRR_ID}.sra" ]; then
+            SRA_FILE="${SRR_ID}.sra"
+        elif [ -f "${SRR_ID}.sralite" ]; then
+            SRA_FILE="${SRR_ID}.sralite"
+        else
+            echo "✗ ${SRR_ID}.sra or ${SRR_ID}.sralite not found, skipping"
             continue
         fi
-        
-        echo "→ Submitting conversion job for ${SRR_ID}.sra"
+
+        echo "→ Submitting conversion job for ${SRA_FILE}"
 
         # Submit LSF job for this SRR
         bsub <<EOF
@@ -97,7 +102,8 @@ module load sratoolkit/2.10.4
 
 cd "$DIR"
 
-fastq-dump --split-files ${SRR_ID}.sra --origfmt --gzip -O .
+# Use SRA_FILE variable (supports both .sra and .sralite)
+fastq-dump --split-files "${SRA_FILE}" --origfmt --gzip -O .
 FASTQ_DUMP_EXIT=\$?
 
 # Only cleanup if fastq-dump succeeded AND FASTQs exist with content
@@ -107,16 +113,16 @@ if [ \$FASTQ_DUMP_EXIT -eq 0 ]; then
         # R1 exists and non-empty. For paired-end, R2 must also exist and be non-empty.
         # For single-end, R2 won't exist.
         if [ ! -f "${SRR_ID}_2.fastq.gz" ] || [ -s "${SRR_ID}_2.fastq.gz" ]; then
-            rm -f "${SRR_ID}.sra"
-            echo "✓ FASTQ conversion succeeded; removed ${SRR_ID}.sra"
+            rm -f "${SRA_FILE}"
+            echo "✓ FASTQ conversion succeeded; removed ${SRA_FILE}"
         else
-            echo "FASTQ conversion succeeded but R2 exists but empty for ${SRR_ID}; retaining .sra" 1>&2
+            echo "FASTQ conversion succeeded but R2 exists but empty for ${SRR_ID}; retaining ${SRA_FILE}" 1>&2
         fi
     else
-        echo "FASTQ conversion succeeded but R1 missing or empty for ${SRR_ID}; retaining .sra" 1>&2
+        echo "FASTQ conversion succeeded but R1 missing or empty for ${SRR_ID}; retaining ${SRA_FILE}" 1>&2
     fi
 else
-    echo "FASTQ conversion failed (exit \$FASTQ_DUMP_EXIT) for ${SRR_ID}; retaining .sra" 1>&2
+    echo "FASTQ conversion failed (exit \$FASTQ_DUMP_EXIT) for ${SRR_ID}; retaining ${SRA_FILE}" 1>&2
 fi
 
 EOF
@@ -130,7 +136,9 @@ EOF
 else
     # Single SRA file processing (original functionality)
     INPUTFILE="$1"
+    # Strip both .sra and .sralite extensions
     SAMPLE=$(basename "$INPUTFILE" .sra)
+    SAMPLE=$(basename "$SAMPLE" .sralite)
 
     # Check if FASTQ files already exist AND pass quick validation
     # Supports both single-end (R1 only) and paired-end (R1 + R2)
@@ -187,7 +195,9 @@ cd "$DIR"
 
 # Use basename only since we cd'd into the directory
 # This avoids fastq-dump URL-decoding issues with special chars like '+'
-fastq-dump --split-files "${SAMPLE}.sra" --origfmt --gzip -O .
+# Get the actual filename (supports both .sra and .sralite)
+SRA_BASENAME=\$(basename "$INPUTFILE")
+fastq-dump --split-files "\${SRA_BASENAME}" --origfmt --gzip -O .
 FASTQ_DUMP_EXIT=\$?
 
 # Only cleanup if fastq-dump succeeded AND FASTQs exist with content
@@ -197,16 +207,16 @@ if [ \$FASTQ_DUMP_EXIT -eq 0 ]; then
         # R1 exists and non-empty. For paired-end, R2 must also exist and be non-empty.
         # For single-end, R2 won't exist.
         if [ ! -f "${SAMPLE}_2.fastq.gz" ] || [ -s "${SAMPLE}_2.fastq.gz" ]; then
-            rm -f "${SAMPLE}.sra"
-            echo "✓ FASTQ conversion succeeded; removed ${SAMPLE}.sra"
+            rm -f "\${SRA_BASENAME}"
+            echo "✓ FASTQ conversion succeeded; removed \${SRA_BASENAME}"
         else
-            echo "FASTQ conversion succeeded but R2 exists but empty for ${SAMPLE}; retaining .sra" 1>&2
+            echo "FASTQ conversion succeeded but R2 exists but empty for ${SAMPLE}; retaining \${SRA_BASENAME}" 1>&2
         fi
     else
-        echo "FASTQ conversion succeeded but R1 missing or empty for ${SAMPLE}; retaining .sra" 1>&2
+        echo "FASTQ conversion succeeded but R1 missing or empty for ${SAMPLE}; retaining \${SRA_BASENAME}" 1>&2
     fi
 else
-    echo "FASTQ conversion failed (exit \$FASTQ_DUMP_EXIT) for ${SAMPLE}; retaining .sra" 1>&2
+    echo "FASTQ conversion failed (exit \$FASTQ_DUMP_EXIT) for ${SAMPLE}; retaining \${SRA_BASENAME}" 1>&2
 fi
 
 EOF
