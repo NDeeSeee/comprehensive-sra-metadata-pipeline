@@ -1374,13 +1374,25 @@ class SRAWorkflow:
         return True, "All safety checks passed"
 
     def cleanup_empty_srr_dirs(self):
-        """Remove empty accession directories (SRR*/ERR*) left by prefetch."""
-        for entry in self.cancer_dir.iterdir():
-            if entry.is_dir() and (entry.name.startswith('SRR') or entry.name.startswith('ERR')):
+        """Remove empty accession directories (SRR*/ERR*) left by prefetch.
+
+        CRITICAL: Only removes directories for SRRs listed in sample_list.txt.
+        Does NOT touch directories from other experiments/samples.
+        """
+        # Build set of SRR IDs from sample list
+        srr_ids = set()
+        for s in self.samples.values():
+            for sid in s['srr_ids']:
+                srr_ids.add(sid)
+
+        # Only check directories for SRRs in our sample list
+        for srr_id in srr_ids:
+            srr_dir = self.cancer_dir / srr_id
+            if srr_dir.is_dir():
                 try:
-                    if not any(entry.iterdir()):
-                        entry.rmdir()
-                        logger.info(self._c(f"  ✓ Removed empty directory {entry}", self._C_GREEN))
+                    if not any(srr_dir.iterdir()):
+                        srr_dir.rmdir()
+                        logger.info(self._c(f"  ✓ Removed empty directory {srr_dir.name}", self._C_GREEN))
                 except Exception:
                     pass
 
@@ -1582,10 +1594,16 @@ class SRAWorkflow:
         Invalid BAMs are typically created when alignment fails due to corrupted FASTQs.
         Removing them ensures the workflow can re-process the sample correctly.
 
+        CRITICAL: Only removes BAMs for samples listed in sample_list.txt.
+        Does NOT touch BAM files from other experiments/samples.
+
         This runs early in the workflow to clean up artifacts from previous failed runs.
         """
         removed_bams = []
         removed_bam_filenames = []  # Track filenames for logging
+
+        # Build set of sample IDs from sample list
+        sample_ids = set(self.samples.keys())
 
         # Check root directory and bams/ or bams1/ subdirectory
         search_dirs = [self.cancer_dir]
@@ -1596,38 +1614,42 @@ class SRAWorkflow:
         if bams1_subdir.is_dir():
             search_dirs.append(bams1_subdir)
 
-        for search_dir in search_dirs:
-            try:
-                for bam_file in search_dir.glob('*.bam'):
-                    try:
-                        if not bam_file.is_file():
+        # Only process BAMs for samples in our sample list
+        for sample_id in sample_ids:
+            for search_dir in search_dirs:
+                # Look for BAM files matching this sample ID
+                bam_pattern = f"{sample_id}*.bam"
+                try:
+                    for bam_file in search_dir.glob(bam_pattern):
+                        try:
+                            if not bam_file.is_file():
+                                continue
+
+                            size = bam_file.stat().st_size
+
+                            # Check if BAM is 0 bytes or very small (< 1KB, likely corrupted header)
+                            if size == 0:
+                                bam_file.unlink()
+                                removed_bams.append((bam_file.name, 'empty'))
+                                removed_bam_filenames.append(bam_file.name)
+                                logger.warning(self._c(
+                                    f"  ✗ Removed 0-byte BAM: {bam_file.name}",
+                                    self._C_YELLOW
+                                ))
+                            elif size < 1024:  # Less than 1KB
+                                bam_file.unlink()
+                                removed_bams.append((bam_file.name, f'{size}B'))
+                                removed_bam_filenames.append(bam_file.name)
+                                logger.warning(self._c(
+                                    f"  ✗ Removed invalid BAM ({size}B): {bam_file.name}",
+                                    self._C_YELLOW
+                                ))
+
+                        except (OSError, PermissionError) as e:
+                            logger.debug(f"Could not process {bam_file}: {e}")
                             continue
-
-                        size = bam_file.stat().st_size
-
-                        # Check if BAM is 0 bytes or very small (< 1KB, likely corrupted header)
-                        if size == 0:
-                            bam_file.unlink()
-                            removed_bams.append((bam_file.name, 'empty'))
-                            removed_bam_filenames.append(bam_file.name)
-                            logger.warning(self._c(
-                                f"  ✗ Removed 0-byte BAM: {bam_file.name}",
-                                self._C_YELLOW
-                            ))
-                        elif size < 1024:  # Less than 1KB
-                            bam_file.unlink()
-                            removed_bams.append((bam_file.name, f'{size}B'))
-                            removed_bam_filenames.append(bam_file.name)
-                            logger.warning(self._c(
-                                f"  ✗ Removed invalid BAM ({size}B): {bam_file.name}",
-                                self._C_YELLOW
-                            ))
-
-                    except (OSError, PermissionError) as e:
-                        logger.debug(f"Could not process {bam_file}: {e}")
-                        continue
-            except Exception as e:
-                logger.debug(f"Error scanning {search_dir} for invalid BAMs: {e}")
+                except Exception as e:
+                    logger.debug(f"Error scanning {search_dir} for BAMs matching {bam_pattern}: {e}")
 
         if removed_bams:
             logger.warning(self._c(
