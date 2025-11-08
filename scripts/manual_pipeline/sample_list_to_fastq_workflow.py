@@ -851,41 +851,53 @@ class SRAWorkflow:
                 if sra_file:
                     # Validate SRA before submitting conversion job
                     if not self._validate_sra_file(sra_file):
-                        logger.warning(self._c(f"  ! {sra_file.name} exists but is invalid/corrupted; skipping conversion", self._C_YELLOW))
-                        logger.warning(self._c(f"  ! Run script again to re-download this SRA", self._C_YELLOW))
-                        # Persist status so generate_status_report can show why conversion didn't happen
-                        status_file = self.logs_dir / f"conversion_{srr_id}.status"
+                        logger.warning(self._c(f"  ! {sra_file.name} exists but is invalid/corrupted", self._C_YELLOW))
+                        logger.warning(self._c(f"  ! Removing invalid SRA and will re-download", self._C_YELLOW))
                         try:
-                            status_file.write_text("SRA_INVALID")
-                        except OSError:
-                            pass
+                            sra_file.unlink()
+                        except Exception as e:
+                            logger.warning(f"Could not remove invalid SRA: {e}")
+                        sra_file = None  # Mark as missing so re-download logic triggers below
+
+                # If SRA doesn't exist or was just removed, re-download it
+                if not sra_file:
+                    logger.info(self._c(f"→ {srr_id} SRA missing/invalid; re-downloading...", self._C_CYAN))
+                    try:
+                        self._download_single_sra(srr_id, sample_id)
+                        # After download, re-check if SRA now exists
+                        sra_file = self._find_sra_file(srr_id)
+                        if not sra_file:
+                            logger.error(self._c(f"  ✗ {srr_id} re-download failed; cannot convert", self._C_RED))
+                            continue
+                    except Exception as e:
+                        logger.error(self._c(f"  ✗ {srr_id} re-download failed: {e}", self._C_RED))
                         continue
 
-                    logger.info(self._c(f"→ Submitting conversion job for {sra_file.name}", self._C_CYAN))
-                    try:
-                        # Capture bsub output from submit_fastq_dump_jobs.sh to parse Job ID
-                        proc = subprocess.run(
-                            ['bash', str(fdump_script), str(sra_file)],
-                            cwd=self.cancer_dir,
-                            check=True,
-                            capture_output=True,
-                            text=True
-                        )
-                        job_id = self._parse_bsub_job_id(proc.stdout + (proc.stderr or ''))
-                        if job_id:
-                            self.submitted_jobs[srr_id] = job_id
-                            try:
-                                self._persist_submitted_job(srr_id, job_id)
-                            except Exception:
-                                pass
-                            jobs_to_wait[srr_id] = job_id
-                            logger.info(self._c(f"  ✓ Submitted as Job <{job_id}>", self._C_GREEN))
-                            submitted += 1
-                        else:
-                            logger.warning(self._c("  ! Could not parse Job ID; will proceed without waiting for this SRR", self._C_YELLOW))
-                    except subprocess.CalledProcessError as e:
-                        logger.error(self._c(f"Failed to submit conversion for {srr_id}: {e}", self._C_RED))
-                # If neither FASTQs nor .sra exist, nothing to do for this SRR
+                # Now submit conversion job (SRA exists and is valid)
+                logger.info(self._c(f"→ Submitting conversion job for {sra_file.name}", self._C_CYAN))
+                try:
+                    # Capture bsub output from submit_fastq_dump_jobs.sh to parse Job ID
+                    proc = subprocess.run(
+                        ['bash', str(fdump_script), str(sra_file)],
+                        cwd=self.cancer_dir,
+                        check=True,
+                        capture_output=True,
+                        text=True
+                    )
+                    job_id = self._parse_bsub_job_id(proc.stdout + (proc.stderr or ''))
+                    if job_id:
+                        self.submitted_jobs[srr_id] = job_id
+                        try:
+                            self._persist_submitted_job(srr_id, job_id)
+                        except Exception:
+                            pass
+                        jobs_to_wait[srr_id] = job_id
+                        logger.info(self._c(f"  ✓ Submitted as Job <{job_id}>", self._C_GREEN))
+                        submitted += 1
+                    else:
+                        logger.warning(self._c("  ! Could not parse Job ID; will proceed without waiting for this SRR", self._C_YELLOW))
+                except subprocess.CalledProcessError as e:
+                    logger.error(self._c(f"Failed to submit conversion for {srr_id}: {e}", self._C_RED))
 
         logger.info(self._c(f"Summary: SRRs={total_srrs}, skipped_fastq={skipped_fastq}, skipped_dbgap={skipped_dbgap}, submitted={submitted}", self._C_MAGENTA))
         # Optionally wait for jobs to finish
