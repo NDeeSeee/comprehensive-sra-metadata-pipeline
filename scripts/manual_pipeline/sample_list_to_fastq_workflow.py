@@ -735,7 +735,25 @@ class SRAWorkflow:
                     logger.debug(f"Could not remove {srr_dir}: {e}")
 
             # Check if download succeeded and validate integrity (supports both .sra and .sralite)
-            sra_file = self._find_sra_file(srr_id)
+            # CRITICAL: NFS filesystem delay - after moving files, they may not be visible immediately
+            # Retry with delays before declaring download failed (similar to FASTQ conversion)
+            max_retries = 6  # 6 retries = up to 60 seconds total
+            retry_delay = 10  # seconds between retries
+            sra_file = None
+
+            for attempt in range(max_retries):
+                sra_file = self._find_sra_file(srr_id)
+                if sra_file:
+                    break  # File found, exit retry loop
+                if attempt < max_retries - 1:
+                    # File not visible yet after move, wait for NFS to sync
+                    logger.debug(
+                        f"    ⏳ {srr_id} .sra/.sralite not visible yet after move; "
+                        f"waiting {retry_delay}s for NFS sync (attempt {attempt+1}/{max_retries})"
+                    )
+                    time.sleep(retry_delay)
+
+            # Now check if file exists after retries
             if sra_file:
                 if self._validate_sra_file(sra_file):
                     logger.info(self._c(f"    ✓ {sra_file.name} downloaded and validated successfully", self._C_GREEN))
