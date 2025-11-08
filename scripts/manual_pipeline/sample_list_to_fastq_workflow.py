@@ -903,9 +903,9 @@ class SRAWorkflow:
         except Exception as e:
             logger.warning(f"Failed to update status report: {e}")
 
-        # If BAMs exist, perform final cleanup of SRAs and FASTQs for those samples
+        # If BAMs exist, perform final cleanup of SRAs (NOT FASTQs - user needs both!)
         try:
-            self.cleanup_artifacts_for_completed_samples()
+            self.cleanup_sras_for_completed_samples()
         except Exception as e:
             logger.warning(self._c(f"Final cleanup skipped due to error: {e}", self._C_YELLOW))
 
@@ -1446,18 +1446,15 @@ class SRAWorkflow:
         if skipped_unsafe:
             logger.info(self._c(f"  ℹ Skipped {skipped_unsafe} .sra file(s) due to safety checks (in use or recently modified)", self._C_CYAN))
 
-    def cleanup_artifacts_for_completed_samples(self):
-        """If a sample has a BAM, remove its SRR .sra and FASTQs to free space.
+    def cleanup_sras_for_completed_samples(self):
+        """If a sample has a BAM, remove only its SRR .sra files to free space.
 
-        CRITICAL: Validates FASTQs thoroughly before deletion. If corruption is detected,
-        preserves FASTQs and SRA for investigation and potential BAM regeneration.
+        IMPORTANT: User needs BOTH BAMs AND FASTQs - only delete .sra files!
+        FASTQs are preserved even when BAM exists.
 
-        This prevents data loss when BAMs may have been built from corrupted FASTQs.
+        This only cleans up intermediate .sra files after successful conversion to FASTQ.
         """
         total_sra_removed = 0
-        total_fastq_removed = 0
-        corrupted_detected = []
-        corrupted_preserved = []
 
         for sample_id, sample_data in self.samples.items():
             if not self._sample_has_bam(sample_id):
@@ -1466,74 +1463,20 @@ class SRAWorkflow:
                 r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
                 r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
 
-                # CRITICAL: Validate FASTQs thoroughly before deletion (handles single-end and paired-end)
-                should_delete = True
+                # Only delete SRA if FASTQs exist (confirms successful conversion)
                 if r1.exists():
-                    try:
-                        # Use thorough=True to catch all corruption before deleting source data
-                        is_valid, reason = self._validate_fastq_pair(r1, r2, srr_id, thorough=True)
-                        if not is_valid:
-                            # CRITICAL: Distinguish between "job still running" and actual corruption
-                            # "LSF job still running" means validation was skipped to avoid race condition
-                            # This is NOT corruption - just can't validate yet, skip cleanup
-                            if "LSF job still running" in reason or "RUN/PEND" in reason:
-                                logger.debug(f"  ℹ {sample_id}/{srr_id}: Skipping cleanup - conversion job still active")
-                                should_delete = False  # Skip cleanup, job still writing
-                            else:
-                                # Real corruption detected - preserve files and warn user
-                                logger.error(self._c(
-                                    f"  ✗ {sample_id}/{srr_id}: BAM exists but FASTQ corrupted: {reason}",
-                                    self._C_RED
-                                ))
-                                logger.error(self._c(
-                                    f"  ✗ PRESERVING corrupted FASTQ and SRA for investigation!",
-                                    self._C_RED
-                                ))
-                                logger.error(self._c(
-                                    f"  ✗ BAM may be invalid - recommend re-validating or re-running alignment",
-                                    self._C_RED
-                                ))
-                                corrupted_detected.append(srr_id)
-                                corrupted_preserved.append((sample_id, srr_id, reason))
-                                should_delete = False  # CRITICAL: Don't delete corrupted data
-                    except Exception as e:
-                        logger.warning(f"FASTQ validation failed for {srr_id}: {e}; skipping deletion to be safe")
-                        should_delete = False
-
-                # Only delete if validation definitively passed
-                if should_delete:
                     # Delete SRA file (supports both .sra and .sralite)
+                    # DO NOT DELETE FASTQs - user needs them!
                     sra_file = self._find_sra_file(srr_id)
                     with contextlib.suppress(Exception):
                         if sra_file:
                             sra_file.unlink()
                             total_sra_removed += 1
-                    with contextlib.suppress(Exception):
-                        if r1.exists():
-                            r1.unlink()
-                            total_fastq_removed += 1
-                    with contextlib.suppress(Exception):
-                        if r2.exists():
-                            r2.unlink()
-                            total_fastq_removed += 1
 
-        if total_sra_removed or total_fastq_removed:
+        if total_sra_removed:
             logger.info(self._c(
-                f"  ✓ Final cleanup (BAM present): removed {total_sra_removed} .sra and {total_fastq_removed} FASTQ files",
+                f"  ✓ Final cleanup (BAM present): removed {total_sra_removed} .sra files (FASTQs preserved)",
                 self._C_GREEN
-            ))
-        if corrupted_preserved:
-            logger.error(self._c(
-                f"  ✗ CRITICAL: Preserved {len(corrupted_preserved)} corrupted FASTQ(s) with existing BAMs!",
-                self._C_RED
-            ))
-            logger.error(self._c(
-                f"  ✗ Affected samples: {', '.join([f'{s}/{r}' for s, r, _ in corrupted_preserved[:5]])}{'...' if len(corrupted_preserved) > 5 else ''}",
-                self._C_RED
-            ))
-            logger.error(self._c(
-                f"  ✗ ACTION REQUIRED: Validate BAMs or regenerate alignments for these samples!",
-                self._C_RED
             ))
 
     def _log_removed_zero_bams(self, removed_bam_filenames):
