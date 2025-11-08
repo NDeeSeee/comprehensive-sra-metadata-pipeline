@@ -380,6 +380,11 @@ class SRAWorkflow:
         """
         id_str = f"{srr_id}: " if srr_id else ""
 
+        # CRITICAL: Don't validate if job is still actively running
+        # This prevents race conditions where we check files while they're being written
+        if srr_id and self._srr_has_active_lsf_job(srr_id):
+            return False, f"{id_str}LSF job still running (RUN/PEND); skipping validation to avoid race condition"
+
         # Detect layout: single-end or paired-end
         r1_exists = r1_path.exists()
         r2_exists = r2_path.exists()
@@ -1173,15 +1178,17 @@ class SRAWorkflow:
                 # else still running (e.g., RUN, PEND)
                 else:
                     # Detect stuck jobs: if status stays non-terminal for many cycles, break out with warning
+                    # TIMEOUT: 6 hours for large SRA files (2-3 GB files can take 4-6 hours on slow network storage)
                     cycles = self.job_poll_cycles.get(srr_id, 0) + 1
                     self.job_poll_cycles[srr_id] = cycles
-                    # Calculate max cycles for 30 minutes based on actual poll interval
-                    max_cycles_for_30min = max(30, int(1800 / self.poll_interval_sec))
+                    # Calculate max cycles for 6 hours based on actual poll interval
+                    max_cycles_for_timeout = max(30, int(21600 / self.poll_interval_sec))  # 21600s = 6 hours
                     elapsed_seconds = cycles * self.poll_interval_sec
-                    if cycles >= max_cycles_for_30min:
+                    elapsed_hours = elapsed_seconds / 3600
+                    if cycles >= max_cycles_for_timeout:
                         logger.warning(self._c(
                             f"  ! {srr_id} appears stuck in status {status} for {cycles} cycles "
-                            f"({elapsed_seconds}s); marking finished without FASTQs",
+                            f"({elapsed_hours:.1f}h / {elapsed_seconds}s); marking finished without FASTQs",
                             self._C_YELLOW
                         ))
                         finished.append(srr_id)
@@ -1290,6 +1297,30 @@ class SRAWorkflow:
                         logger.info(self._c(f"  ✓ Removed empty directory {entry}", self._C_GREEN))
                 except Exception:
                     pass
+
+    def _srr_has_active_lsf_job(self, srr_id: str) -> bool:
+        """Check if an SRR has an active LSF job still running.
+
+        Returns True if job is in RUN, PEND, or other non-terminal state.
+        This prevents race conditions where we validate FASTQs while they're being written.
+        """
+        try:
+            result = subprocess.run(
+                ['bjobs', '-w'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                # Check if this SRR appears in active jobs
+                for line in result.stdout.split('\n'):
+                    if f'fastq_{srr_id}' in line and ('RUN' in line or 'PEND' in line):
+                        return True
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            logger.debug(f"Could not check LSF jobs for {srr_id}: {e}")
+        except Exception as e:
+            logger.debug(f"Error checking LSF jobs for {srr_id}: {e}")
+        return False
 
     def cleanup_converted_sras_global(self):
         """Delete .sra files when FASTQs exist and pass gzip integrity validation (handles both single-end and paired-end).
