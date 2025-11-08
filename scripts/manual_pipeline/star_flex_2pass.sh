@@ -16,6 +16,17 @@ GTF=/data/salomonis2/Genomes/STAR-2.7.10b-Index-GRCH38/Homo_sapiens.GRCh38.85.gt
 run_one_sample() {
   local sample="$1" fq1="$2" fq2="${3:-}"
 
+  # Optional status tracking file passed via environment (set by submitter)
+  local status_file="${STAR_STATUS_FILE:-}"
+
+  update_status() {
+    local new_status="$1"
+    if [[ -n "$status_file" && -f "$status_file" ]]; then
+      local tmp="${status_file}.tmp.$$"
+      awk -v s="$sample" -v st="$new_status" 'BEGIN{FS=OFS="\t"} { if ($1==s) { $4=st } print $0 }' "$status_file" > "$tmp" && mv "$tmp" "$status_file" || true
+    fi
+  }
+
   # Load modules if available (non-fatal if module not present)
   module load STAR/2.7.10b >/dev/null 2>&1 || true
   module load samtools >/dev/null 2>&1 || true
@@ -30,12 +41,16 @@ run_one_sample() {
   if [[ -e "$final_bam" ]]; then
     if [[ -s "$final_bam" ]]; then
       echo "Output BAM already exists and is non-empty: $final_bam — skipping."
+      update_status "BAM_IS_DONE"
       return 0
     else
       echo "Zero-size BAM detected at $final_bam — removing and recalculating."
       rm -f "$final_bam" || true
     fi
   fi
+
+  # Mark status as in-progress at start
+  update_status "BAM_IN_PROGRESS"
 
   # Support comma-separated lists of FASTQs (from sample_list.with_status.txt)
   IFS=',' read -r -a fq1_list <<<"$fq1"
@@ -132,11 +147,25 @@ run_one_sample() {
     star_cmd+=( --readFilesCommand "gunzip -c" )
   fi
 
-  "${star_cmd[@]}"
+  # Run STAR; on failure, mark error and exit
+  if ! "${star_cmd[@]}"; then
+    echo "STAR failed for sample ${sample}" >&2
+    update_status "BAM_ERROR"
+    exit 4
+  fi
 
   # Move BAM to final location
   if [[ -f "${root_dir}/${sample}_Aligned.sortedByCoord.out.bam" ]]; then
     mv "${root_dir}/${sample}_Aligned.sortedByCoord.out.bam" "${root_dir}/bams/${sample}.bam"
+  fi
+
+  # Validate final BAM and set status accordingly
+  if [[ -s "${root_dir}/bams/${sample}.bam" ]]; then
+    update_status "BAM_IS_DONE"
+  else
+    echo "Alignment finished but BAM missing or zero-size for ${sample}" >&2
+    update_status "BAM_ERROR"
+    exit 5
   fi
 
   # Keep Log.final.out; clean large intermediates
@@ -168,7 +197,16 @@ submit_from_list() {
     [[ -z "${SAMPLE}" ]] && continue
     [[ "${SAMPLE}" =~ ^# ]] && continue
 
-    # Submit; the run mode will validate file existence and pairedness
+    # Respect status column when present: only submit FASTQ_IS_DONE
+    if [[ -n "${_STATUS:-}" && "${_STATUS}" != "FASTQ_IS_DONE" ]]; then
+      echo "Skip ${SAMPLE}: status=${_STATUS}" >&2
+      continue
+    fi
+
+    echo "Submit ${SAMPLE}: status=${_STATUS:-N/A}"
+
+    # Submit; the run mode will validate file existence and pairedness. Pass status file via env
+    STAR_STATUS_FILE="${sample_list}" \
     bsub -W 12:00 -n "${THREADS}" -M 128000 \
          -R "rusage[mem=16000] span[hosts=1]" \
          -J "align_${SAMPLE}" \
