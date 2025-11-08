@@ -23,7 +23,7 @@ _project_aliases_resolve_root() {
     script_path="$src"
   fi
   local this_dir
-  this_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  this_dir="$(cd "$(dirname "$script_path")" && pwd)"
   echo "$(cd "${this_dir}/.." && pwd)"
 }
 
@@ -451,6 +451,16 @@ run_fastq_workflows() {
 }
 alias run-fastq-workflows=run_fastq_workflows
 alias rwf=run_fastq_workflows
+
+star_flex_2pass() {
+  # Unified STAR 2-pass (flex) submitter/runner
+  # Usage:
+  #   star-flex <sample_list.tsv>
+  #   star-flex <SAMPLE> <FASTQ1> [FASTQ2]
+  bash "${POSEIDON_MANUAL_DIR}/star_flex_2pass.sh" "$@"
+}
+alias star-flex=star_flex_2pass
+alias star_flex=star_flex_2pass
 
 commands_help() {
   cat <<'EOF'
