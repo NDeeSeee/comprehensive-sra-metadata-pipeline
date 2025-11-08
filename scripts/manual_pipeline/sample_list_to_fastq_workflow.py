@@ -855,9 +855,17 @@ class SRAWorkflow:
                         continue
                     else:
                         logger.warning(self._c(f"  ! {srr_id} FASTQs exist but invalid: {reason}", self._C_YELLOW))
-                        logger.warning(self._c(f"  ! Will reconvert from SRA", self._C_YELLOW))
-                        # Remove invalid files - this ensures bash script can proceed with clean slate
-                        self._cleanup_corrupted_fastqs(srr_id, reason)
+
+                        # CRITICAL: Don't remove FASTQs if validation was skipped (job still running)
+                        # Removing files being written creates .nfs ghost files and causes data loss!
+                        if "LSF job still running" in reason or "RUN/PEND" in reason:
+                            logger.info(f"  ℹ Skipping removal - conversion job still active")
+                            # Don't remove FASTQs, just skip to job check below
+                        else:
+                            # Actually corrupted - safe to remove and reconvert
+                            logger.warning(self._c(f"  ! Will reconvert from SRA", self._C_YELLOW))
+                            # Remove invalid files - this ensures bash script can proceed with clean slate
+                            self._cleanup_corrupted_fastqs(srr_id, reason)
 
                 # If there is an active job from a previous run, do not resubmit
                 prev_job = self.submitted_jobs.get(srr_id)
