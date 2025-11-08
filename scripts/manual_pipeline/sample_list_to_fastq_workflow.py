@@ -1712,6 +1712,52 @@ class SRAWorkflow:
             return f"NEEDS_CONVERSION (invalid SRA: {', '.join(invalid_sras[:3])}{'...' if len(invalid_sras) > 3 else ''})"
         return None
 
+    def _count_srr_progress_fast(self, srr_ids):
+        """Fast progress counting for real-time status display.
+
+        Uses basic file existence checks (no expensive validation).
+        This is optimized for frequent updates in the monitoring loop.
+
+        Returns:
+            Tuple of (sra_count, fastq_count, total_count)
+            - sra_count: Number of SRRs with valid SRA files
+            - fastq_count: Number of SRRs with complete FASTQ files
+            - total_count: Total number of SRRs in sample
+        """
+        total = len(srr_ids)
+        sra_count = 0
+        fastq_count = 0
+
+        for srr_id in srr_ids:
+            # Check if SRA exists (supports both .sra and .sralite)
+            sra_file = self._find_sra_file(srr_id)
+            if sra_file:
+                try:
+                    if sra_file.stat().st_size > 1024:  # >1KB = real file
+                        sra_count += 1
+                except OSError:
+                    pass
+
+            # Check if FASTQ exists (handles both single-end and paired-end)
+            r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
+            if r1.exists():
+                try:
+                    r1_size = r1.stat().st_size
+                    if r1_size > 100:  # >100B = real file
+                        # For single-ended: R1 exists and R2 doesn't
+                        # For paired-end: Both R1 and R2 exist
+                        r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
+                        if not r2.exists():
+                            # Single-ended layout
+                            fastq_count += 1
+                        elif r2.stat().st_size > 100:
+                            # Paired-end layout with both files
+                            fastq_count += 1
+                except OSError:
+                    pass
+
+        return sra_count, fastq_count, total
+
     def _analyze_fastq_status(self, srr_ids):
         """Analyze FASTQ file status for all SRRs in a sample.
 
@@ -1753,58 +1799,66 @@ class SRAWorkflow:
 
         return all_fastqs_ok, any_fastq_missing, any_sra_present_missing_fastq, any_missing_both
 
-    def _determine_sample_status(self, sample_id, srr_ids, all_fastqs_ok, any_fastq_missing,
-                                   any_sra_present_missing_fastq, any_missing_both):
-        """Determine sample status using ordered priority checks.
+    def _determine_sample_status(self, sample_id, srr_ids):
+        """Determine aggregated sample status with real-time progress tracking.
 
-        Status priority (checked in order):
-        1. DBGaP_REQUIRED - Access restrictions detected
+        Uses clean status progression with progress counts for actionable reporting.
+
+        Status lifecycle (in priority order):
+        1. DBGaP_REQUIRED - Access restrictions, cannot proceed
         2. BAM_DONE - Final output exists
-        3. ALIGN_IN_PROGRESS - STAR alignment running
-        4. FASTQ_DONE - All FASTQs ready
-        5. CONVERTING - SRA->FASTQ conversion in progress
-        6. NEEDS_CONVERSION - SRA exists but FASTQs incomplete
-        7. NEEDS_PREFETCH - No SRA, no FASTQs
-        8. UNKNOWN - Fallback
-        """
-        # Priority 1: DBGaP required
-        status = self._check_dbgap_required(srr_ids)
-        if status:
-            return status
+        3. BAM_IN_PROGRESS - STAR alignment running
+        4. FASTQ_DONE - All FASTQs ready (STAR can start)
+        5. FASTQ_IN_PROGRESS (X/N done) - Converting SRA to FASTQ
+        6. SRA_IN_PROGRESS (X/N done) - Downloading SRA files
 
-        # Priority 2: BAM exists (final output)
+        Returns:
+            str: Status string with progress counts where applicable
+        """
+        total = len(srr_ids)
+
+        # Get fast progress counts (file existence only, no expensive validation)
+        sra_count, fastq_count, _ = self._count_srr_progress_fast(srr_ids)
+
+        # Priority 1: DBGaP access required (cannot proceed)
+        dbgap_status = self._check_dbgap_required(srr_ids)
+        if dbgap_status:
+            return dbgap_status  # Returns 'DBGaP_REQUIRED'
+
+        # Priority 2: BAM exists (final output, workflow complete)
         if self._sample_has_bam(sample_id):
             return 'BAM_DONE'
 
-        # Priority 3-4: All FASTQs present
-        if all_fastqs_ok:
+        # Priority 3: All FASTQs complete - check if alignment is active
+        if fastq_count == total:
+            # Check for active STAR alignment
             has_active_alignment, has_stale_dirs = self._has_star_progress_dirs(sample_id)
             if has_active_alignment:
-                return 'ALIGN_IN_PROGRESS'
-            elif has_stale_dirs:
+                return 'BAM_IN_PROGRESS'
+            # Stale STAR dirs are just a warning, don't change main status
+            if has_stale_dirs:
                 return 'FASTQ_DONE (stale STAR dirs - cleanup recommended)'
             return 'FASTQ_DONE'
 
-        # Priority 5: Active conversion job
-        for sid in srr_ids:
-            job_id = self.submitted_jobs.get(sid)
-            if job_id and self._is_job_active(job_id):
-                return f"CONVERTING (SRA -> FASTQ, job ID <{job_id}>)"
+        # Priority 4: All SRAs ready, converting to FASTQ
+        if sra_count == total:
+            # Show progress if some FASTQs are done
+            if fastq_count > 0:
+                return f'FASTQ_IN_PROGRESS ({fastq_count}/{total} done)'
+            # Check for active conversion jobs (job submitted but output not detected yet)
+            for sid in srr_ids:
+                job_id = self.submitted_jobs.get(sid)
+                if job_id and self._is_job_active(job_id):
+                    return f'FASTQ_IN_PROGRESS ({fastq_count}/{total} done)'
+            # SRAs ready but no active jobs and no FASTQs - needs conversion
+            return f'FASTQ_IN_PROGRESS ({fastq_count}/{total} done)'
 
-        # Priority 6: SRA exists but needs conversion
-        if any_sra_present_missing_fastq:
-            # Check if we have detailed status about WHY conversion didn't happen
-            detailed_status = self._check_conversion_status(srr_ids)
-            if detailed_status:
-                return detailed_status
-            return 'NEEDS_CONVERSION'
+        # Priority 5: Still downloading SRAs
+        if sra_count > 0:
+            return f'SRA_IN_PROGRESS ({sra_count}/{total} done)'
 
-        # Priority 7: Nothing exists, needs prefetch
-        if any_missing_both and any_fastq_missing:
-            return 'NEEDS_PREFETCH'
-
-        # Priority 8: Unknown state (should be rare)
-        return 'UNKNOWN'
+        # Priority 6: Nothing started yet
+        return f'SRA_IN_PROGRESS (0/{total} done)'
 
     def generate_status_report(self, log_header: bool = True):
         """Generate sample status report (4 columns, exact format).
@@ -1848,20 +1902,16 @@ class SRAWorkflow:
             r1_list = ",".join(r1_entries)
             r2_list = ",".join(r2_entries) if r2_entries else ""
 
-            # Analyze FASTQ status
-            all_fastqs_ok, any_fastq_missing, any_sra_present_missing_fastq, any_missing_both = \
-                self._analyze_fastq_status(srr_ids)
-
-            # Determine status using ordered priority checks
-            status = self._determine_sample_status(
-                sample_id, srr_ids, all_fastqs_ok, any_fastq_missing,
-                any_sra_present_missing_fastq, any_missing_both
-            )
+            # Get real-time status with progress tracking
+            status = self._determine_sample_status(sample_id, srr_ids)
 
             lines.append(f"{sample_id}\t{r1_list}\t{r2_list}\t{status}")
 
-        with open(status_file, 'w') as f:
+        # Atomic write using temp file (prevents corruption during updates)
+        temp_file = status_file.with_suffix('.tmp')
+        with temp_file.open('w') as f:
             f.write("\n".join(lines) + "\n")
+        temp_file.replace(status_file)
 
     def run(self):
         """Execute the complete workflow"""
