@@ -755,25 +755,7 @@ class SRAWorkflow:
                     logger.debug(f"Could not remove {srr_dir}: {e}")
 
             # Check if download succeeded and validate integrity (supports both .sra and .sralite)
-            # CRITICAL: NFS filesystem delay - after moving files, they may not be visible immediately
-            # Retry with delays before declaring download failed (similar to FASTQ conversion)
-            max_retries = 6  # 6 retries = up to 60 seconds total
-            retry_delay = 10  # seconds between retries
-            sra_file = None
-
-            for attempt in range(max_retries):
-                sra_file = self._find_sra_file(srr_id)
-                if sra_file:
-                    break  # File found, exit retry loop
-                if attempt < max_retries - 1:
-                    # File not visible yet after move, wait for NFS to sync
-                    logger.debug(
-                        f"    ⏳ {srr_id} .sra/.sralite not visible yet after move; "
-                        f"waiting {retry_delay}s for NFS sync (attempt {attempt+1}/{max_retries})"
-                    )
-                    time.sleep(retry_delay)
-
-            # Now check if file exists after retries
+            sra_file = self._find_sra_file(srr_id)
             if sra_file:
                 if self._validate_sra_file(sra_file):
                     logger.info(self._c(f"    ✓ {sra_file.name} downloaded and validated successfully", self._C_GREEN))
@@ -1181,42 +1163,7 @@ class SRAWorkflow:
                 status = self._bjobs_status(job_id)
                 # Treat common terminal/unknown states as finished
                 if status in ('DONE', 'EXIT', 'ZOMBIE', 'ZOMBI', 'UNKNOWN', 'UNKWN'):
-                    # CRITICAL: NFS filesystem delay - files may not be visible immediately after job completion
-                    # Network filesystems buffer writes and can take 10-60s to propagate files
-                    # For paired-end data, R2 may appear 2-5 seconds after R1 - wait for both!
-                    # Retry with delays before declaring FASTQs truly missing
-                    max_retries = 6  # 6 retries = up to 60 seconds total
-                    retry_delay = 10  # seconds between retries
-
-                    for attempt in range(max_retries):
-                        r1_exists = srr_r1.exists()
-                        r2_exists = srr_r2.exists()
-
-                        # Smart break logic for both single-end and paired-end
-                        if r1_exists and r2_exists:
-                            # Both files present - paired-end ready!
-                            break
-                        elif r1_exists and not r2_exists and attempt >= 2:
-                            # R1 exists, R2 doesn't after 20+ seconds (3 attempts) - likely single-end
-                            # Give it 20s to be sure (fastq-dump creates R2 within seconds of R1)
-                            break
-                        elif not r1_exists and attempt >= max_retries - 1:
-                            # R1 still missing after all retries - truly missing
-                            break
-
-                        if attempt < max_retries - 1:
-                            # Files not ready yet, wait for NFS to flush
-                            if not r1_exists:
-                                logger.info(self._c(
-                                    f"  ⏳ {srr_id} job {status} but R1 not visible yet; "
-                                    f"waiting {retry_delay}s for NFS flush (attempt {attempt+1}/{max_retries})",
-                                    self._C_CYAN
-                                ))
-                            elif r1_exists and not r2_exists:
-                                logger.debug(f"  ⏳ {srr_id} R1 visible, waiting for R2 (paired-end check, attempt {attempt+1}/{max_retries})")
-                            time.sleep(retry_delay)
-
-                    # Check outputs after NFS retry loop (handles both single-end and paired-end)
+                    # Check outputs (handles both single-end and paired-end)
                     if srr_r1.exists():
                         # CRITICAL: Use thorough validation before deleting source SRA
                         is_valid, reason = self._validate_fastq_pair(srr_r1, srr_r2, srr_id, thorough=True)
@@ -1243,23 +1190,7 @@ class SRAWorkflow:
 
                         if status in ('DONE', 'EXIT'):
                             logger.error(self._c(
-                                f"  ✗ {srr_id} job {status} but FASTQs missing! This usually means:",
-                                self._C_RED
-                            ))
-                            logger.error(self._c(
-                                f"     - Network error (Stale file handle) lost output during write",
-                                self._C_RED
-                            ))
-                            logger.error(self._c(
-                                f"     - Disk full during conversion",
-                                self._C_RED
-                            ))
-                            logger.error(self._c(
-                                f"     - Output written to wrong directory",
-                                self._C_RED
-                            ))
-                            logger.error(self._c(
-                                f"  ✗ Keeping .sra for retry. Will auto-resubmit on next run. {log_msg}",
+                                f"  ✗ {srr_id} job {status} but FASTQs missing. {log_msg}",
                                 self._C_RED
                             ))
                         elif status in ('ZOMBIE', 'ZOMBI', 'UNKNOWN', 'UNKWN'):
