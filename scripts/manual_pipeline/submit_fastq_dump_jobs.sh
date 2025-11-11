@@ -1,237 +1,120 @@
 #!/bin/bash
+# submit_fastq_dump_jobs.sh  — LSF job shim for SRA→FASTQ
+# Uses fasterq-dump + pigz, never deletes .sra/.sralite (Python owns cleanup)
 
-# Enhanced FASTQ Conversion Script (previously fdump.sh)
-# Can work with individual SRA files OR sample_list.txt
-# Skips existing FASTQ files automatically
+set -euo pipefail
 
 if [ $# -eq 0 ]; then
-    echo "Usage: $0 <sra_file_or_sample_list>"
-    echo "Examples:"
-    echo "  $0 SRR123456.sra                    # Convert single SRA file"
-    echo "  $0 sample_list.txt                   # Convert all SRAs from sample list"
-    exit 1
+  echo "Usage: $0 <sra_file_or_sample_list>"
+  exit 1
 fi
 
-INPUT=$1
-DIR=$(pwd)
+INPUT="$1"
+DIR="$(pwd)"
 
-# Check if input is sample_list.txt
-if [ "$INPUT" = "sample_list.txt" ] || [ "$(basename "$INPUT")" = "sample_list.txt" ]; then
-    echo "Processing sample_list.txt..."
-    
-    if [ ! -f "$INPUT" ]; then
-        echo "ERROR: sample_list.txt not found in current directory"
-        exit 1
-    fi
-    
-    # Extract SRR IDs from sample_list.txt
-    SRR_IDS=$(tail -n +1 "$INPUT" | awk '{print $2}' | sed 's/_1.fastq.gz//g' | sed 's/_2.fastq.gz//g' | \
-              grep -E '^[SE]RR[0-9]+' | tr ',' '\n' | sort | uniq)
-    
-    echo "Found $(echo "$SRR_IDS" | wc -l) SRR IDs to process"
-    
-    # Create logs directory
-    mkdir -p logs
-    
-    # Process each SRR ID
-    for SRR_ID in $SRR_IDS; do
-        # Check if FASTQ files already exist AND pass quick validation
-        # Supports both single-end (R1 only) and paired-end (R1 + R2)
-        if [ -f "${SRR_ID}_1.fastq.gz" ]; then
-            # Detect layout: single-end (R2 absent) or paired-end (R2 present)
-            if [ -f "${SRR_ID}_2.fastq.gz" ]; then
-                # Paired-end: validate both files
-                if [ -s "${SRR_ID}_1.fastq.gz" ] && [ -s "${SRR_ID}_2.fastq.gz" ]; then
-                    R1_RECENT=$(find "${SRR_ID}_1.fastq.gz" -mmin -2 2>/dev/null)
-                    R2_RECENT=$(find "${SRR_ID}_2.fastq.gz" -mmin -2 2>/dev/null)
-                    if [ -z "$R1_RECENT" ] && [ -z "$R2_RECENT" ]; then
-                        echo "✓ ${SRR_ID} paired-end FASTQ files already exist (stable), skipping"
-                        continue
-                    else
-                        echo "⚠ ${SRR_ID} paired-end FASTQ files recently modified; will re-convert"
-                        rm -f "${SRR_ID}_1.fastq.gz" "${SRR_ID}_2.fastq.gz"
-                    fi
-                else
-                    echo "⚠ ${SRR_ID} paired-end FASTQ files exist but one is empty; will re-convert"
-                    rm -f "${SRR_ID}_1.fastq.gz" "${SRR_ID}_2.fastq.gz"
-                fi
-            else
-                # Single-end: validate R1 only
-                if [ -s "${SRR_ID}_1.fastq.gz" ]; then
-                    R1_RECENT=$(find "${SRR_ID}_1.fastq.gz" -mmin -2 2>/dev/null)
-                    if [ -z "$R1_RECENT" ]; then
-                        echo "✓ ${SRR_ID} single-end FASTQ file already exists (stable), skipping"
-                        continue
-                    else
-                        echo "⚠ ${SRR_ID} single-end FASTQ file recently modified; will re-convert"
-                        rm -f "${SRR_ID}_1.fastq.gz"
-                    fi
-                else
-                    echo "⚠ ${SRR_ID} single-end FASTQ file exists but empty; will re-convert"
-                    rm -f "${SRR_ID}_1.fastq.gz"
-                fi
-            fi
-        fi
-        
-        # Check if SRA file exists (supports both .sra and .sralite formats)
-        SRA_FILE=""
-        if [ -f "${SRR_ID}.sra" ]; then
-            SRA_FILE="${SRR_ID}.sra"
-        elif [ -f "${SRR_ID}.sralite" ]; then
-            SRA_FILE="${SRR_ID}.sralite"
-        else
-            echo "✗ ${SRR_ID}.sra or ${SRR_ID}.sralite not found, skipping"
-            continue
-        fi
+# Helper: submit one SRR
+submit_one() {
+  local SRR_ID="$1"
+  mkdir -p "$DIR/logs"
 
-        echo "→ Submitting conversion job for ${SRA_FILE}"
-
-        # Submit LSF job for this SRR
-        bsub <<EOF
+  bsub <<EOF
 #BSUB -L /bin/bash
 #BSUB -W 72:00
-#BSUB -n 1
+#BSUB -n 8
+#BSUB -R "span[hosts=1]"
+#BSUB -R "rusage[mem=32000]"
 #BSUB -M 32000
-#BSUB -e "$DIR/logs/${SRR_ID}_fastqdump.err.txt"
-#BSUB -o "$DIR/logs/${SRR_ID}_fastqdump.out.txt"
 #BSUB -J fastq_${SRR_ID}
+#BSUB -o "$DIR/logs/fastq_${SRR_ID}.out.txt"
+#BSUB -e "$DIR/logs/fastq_${SRR_ID}.err.txt"
 
-mkdir -p logs
+set -euo pipefail
 
-module load sratoolkit/2.10.4
+SRR_ID="${SRR_ID}"
+DIR="$DIR"
 
-cd "$DIR"
+module load sratoolkit/3.0.10 2>/dev/null || module load sratoolkit/2.11.0 2>/dev/null || true
+command -v fasterq-dump >/dev/null || { echo "fasterq-dump not found" >&2; exit 127; }
 
-# CRITICAL: Pass SRR ID (not filename) to fastq-dump!
-# fastq-dump auto-detects local .sra or .sralite files
-# Passing filename causes wrong output names: SRR123.sralite_1.fastq.gz
-# Passing SRR ID creates correct names: SRR123_1.fastq.gz
-fastq-dump --split-files "${SRR_ID}" --origfmt --gzip -O .
-FASTQ_DUMP_EXIT=\$?
+# Local scratch for temp files (prefer node-local; fall back to /tmp)
+SCRATCH="\${LSB_JOB_TMPDIR:-/tmp}/sra_\${SRR_ID}"
+mkdir -p "\$SCRATCH"
+ulimit -n 4096 || true
 
-# Only cleanup if fastq-dump succeeded AND FASTQs exist with content
-# Handles both single-end (R1 only) and paired-end (R1+R2)
-if [ \$FASTQ_DUMP_EXIT -eq 0 ]; then
-    if [ -s "${SRR_ID}_1.fastq.gz" ]; then
-        # R1 exists and non-empty. For paired-end, R2 must also exist and be non-empty.
-        # For single-end, R2 won't exist.
-        if [ ! -f "${SRR_ID}_2.fastq.gz" ] || [ -s "${SRR_ID}_2.fastq.gz" ]; then
-            rm -f "${SRA_FILE}"
-            echo "✓ FASTQ conversion succeeded; removed ${SRA_FILE}"
-        else
-            echo "FASTQ conversion succeeded but R2 exists but empty for ${SRR_ID}; retaining ${SRA_FILE}" 1>&2
-        fi
-    else
-        echo "FASTQ conversion succeeded but R1 missing or empty for ${SRR_ID}; retaining ${SRA_FILE}" 1>&2
-    fi
+cd "\$DIR"
+
+# 1) Convert to uncompressed FASTQ into scratch
+#    --split-files ensures _1/_2; --threads matches -n; --temp isolates temp I/O
+fasterq-dump "\${SRR_ID}" \
+  --split-files \
+  --threads 8 \
+  --temp "\$SCRATCH" \
+  --outdir "\$SCRATCH" \
+  --progress
+
+# 2) Gzip in parallel (pigz). If pigz missing, fall back to gzip.
+if command -v pigz >/dev/null; then
+  pigz -p 8 "\$SCRATCH/\${SRR_ID}_1.fastq" 2>/dev/null || true
+  [ -f "\$SCRATCH/\${SRR_ID}_2.fastq" ] && pigz -p 8 "\$SCRATCH/\${SRR_ID}_2.fastq" 2>/dev/null || true
 else
-    echo "FASTQ conversion failed (exit \$FASTQ_DUMP_EXIT) for ${SRR_ID}; retaining ${SRA_FILE}" 1>&2
+  gzip "\$SCRATCH/\${SRR_ID}_1.fastq"
+  [ -f "\$SCRATCH/\${SRR_ID}_2.fastq" ] && gzip "\$SCRATCH/\${SRR_ID}_2.fastq" || true
 fi
 
+# 3) Atomically move finished files into DIR
+#    (move then fsync pattern to avoid half-written visibility)
+for f in "\$SCRATCH/\${SRR_ID}_1.fastq.gz" "\$SCRATCH/\${SRR_ID}_2.fastq.gz"; do
+  if [ -f "\$f" ]; then
+    base="\$(basename "\$f")"
+    tmp="\$DIR/\${base}.part"
+    final="\$DIR/\${base}"
+    cp -f "\$f" "\$tmp"
+    sync
+    mv -f "\$tmp" "\$final"
+  fi
+done
+
+# 4) Leave .sra/.sralite in place — Python validates & deletes safely.
+#    Success exit code signals Python to perform thorough validation.
 EOF
-        if [ $? -eq 0 ]; then
-            echo "  ✓ Job submitted for ${SRR_ID}"
-        else
-            echo "  ✗ Job submission failed for ${SRR_ID}"
-        fi
-    done
-    
-else
-    # Single SRA file processing (original functionality)
-    INPUTFILE="$1"
-    # Strip both .sra and .sralite extensions
-    SAMPLE=$(basename "$INPUTFILE" .sra)
-    SAMPLE=$(basename "$SAMPLE" .sralite)
+}
 
-    # Check if FASTQ files already exist AND pass quick validation
-    # Supports both single-end (R1 only) and paired-end (R1 + R2)
-    if [ -f "${SAMPLE}_1.fastq.gz" ]; then
-        # Detect layout: single-end (R2 absent) or paired-end (R2 present)
-        if [ -f "${SAMPLE}_2.fastq.gz" ]; then
-            # Paired-end: validate both files
-            if [ -s "${SAMPLE}_1.fastq.gz" ] && [ -s "${SAMPLE}_2.fastq.gz" ]; then
-                R1_RECENT=$(find "${SAMPLE}_1.fastq.gz" -mmin -2 2>/dev/null)
-                R2_RECENT=$(find "${SAMPLE}_2.fastq.gz" -mmin -2 2>/dev/null)
-                if [ -z "$R1_RECENT" ] && [ -z "$R2_RECENT" ]; then
-                    echo "✓ ${SAMPLE} paired-end FASTQ files already exist (stable), skipping"
-                    exit 0
-                else
-                    echo "⚠ ${SAMPLE} paired-end FASTQ files recently modified; will re-convert"
-                    rm -f "${SAMPLE}_1.fastq.gz" "${SAMPLE}_2.fastq.gz"
-                fi
-            else
-                echo "⚠ ${SAMPLE} paired-end FASTQ files exist but one is empty; will re-convert"
-                rm -f "${SAMPLE}_1.fastq.gz" "${SAMPLE}_2.fastq.gz"
-            fi
-        else
-            # Single-end: validate R1 only
-            if [ -s "${SAMPLE}_1.fastq.gz" ]; then
-                R1_RECENT=$(find "${SAMPLE}_1.fastq.gz" -mmin -2 2>/dev/null)
-                if [ -z "$R1_RECENT" ]; then
-                    echo "✓ ${SAMPLE} single-end FASTQ file already exists (stable), skipping"
-                    exit 0
-                else
-                    echo "⚠ ${SAMPLE} single-end FASTQ file recently modified; will re-convert"
-                    rm -f "${SAMPLE}_1.fastq.gz"
-                fi
-            else
-                echo "⚠ ${SAMPLE} single-end FASTQ file exists but empty; will re-convert"
-                rm -f "${SAMPLE}_1.fastq.gz"
-            fi
-        fi
+# Branch: sample_list.txt
+if [ "$(basename "$INPUT")" = "sample_list.txt" ]; then
+  echo "Processing sample_list.txt..."
+  if [ ! -f "$INPUT" ]; then
+    echo "ERROR: sample_list.txt not found" >&2
+    exit 1
+  fi
+
+  # pull SRR/ERR from both R1 and R2 columns, tolerate commas
+  SRR_IDS=$(
+    awk -F'\t' 'NF>=3 {print $2","$3}' "$INPUT" \
+    | tr ',' '\n' \
+    | sed -E 's/(_1|_2)?\.fastq(\.gz)?$//' \
+    | grep -E '^(SRR|ERR)[0-9]+' \
+    | sort -u
+  )
+
+  count=0
+  for SRR in $SRR_IDS; do
+    # Skip if R1 exists and is non-empty; if paired and R2 exists non-empty, also skip
+    if [ -s "${SRR}_1.fastq.gz" ] && { [ ! -f "${SRR}_2.fastq.gz" ] || [ -s "${SRR}_2.fastq.gz" ]; }; then
+      echo "✓ ${SRR} FASTQs present; skipping"
+      continue
     fi
-    
-    bsub <<EOF
-#BSUB -L /bin/bash
-#BSUB -W 72:00
-#BSUB -n 1
-#BSUB -M 32000
-#BSUB -e "$DIR/logs/${SAMPLE}_fastqdump.err.txt"
-#BSUB -o "$DIR/logs/${SAMPLE}_fastqdump.out.txt"
-#BSUB -J fastq_${SAMPLE}
+    submit_one "$SRR" && count=$((count+1))
+  done
+  echo "Submitted $count jobs."
 
-mkdir -p logs
-
-module load sratoolkit/2.10.4
-
-cd "$DIR"
-
-# CRITICAL: Pass SRR ID (not filename) to fastq-dump!
-# fastq-dump auto-detects local .sra or .sralite files
-# Passing filename causes wrong output names: SRR123.sralite_1.fastq.gz
-# Passing SRR ID creates correct names: SRR123_1.fastq.gz
-# This also avoids URL-decoding issues with special chars like '+'
-fastq-dump --split-files "${SAMPLE}" --origfmt --gzip -O .
-FASTQ_DUMP_EXIT=\$?
-
-# Only cleanup if fastq-dump succeeded AND FASTQs exist with content
-# Handles both single-end (R1 only) and paired-end (R1+R2)
-if [ \$FASTQ_DUMP_EXIT -eq 0 ]; then
-    if [ -s "${SAMPLE}_1.fastq.gz" ]; then
-        # R1 exists and non-empty. For paired-end, R2 must also exist and be non-empty.
-        # For single-end, R2 won't exist.
-        if [ ! -f "${SAMPLE}_2.fastq.gz" ] || [ -s "${SAMPLE}_2.fastq.gz" ]; then
-            # Find and remove the actual SRA file (supports both .sra and .sralite)
-            if [ -f "${SAMPLE}.sra" ]; then
-                rm -f "${SAMPLE}.sra"
-                echo "✓ FASTQ conversion succeeded; removed ${SAMPLE}.sra"
-            elif [ -f "${SAMPLE}.sralite" ]; then
-                rm -f "${SAMPLE}.sralite"
-                echo "✓ FASTQ conversion succeeded; removed ${SAMPLE}.sralite"
-            fi
-        else
-            echo "FASTQ conversion succeeded but R2 exists but empty for ${SAMPLE}; retaining SRA file" 1>&2
-        fi
-    else
-        echo "FASTQ conversion succeeded but R1 missing or empty for ${SAMPLE}; retaining SRA file" 1>&2
-    fi
 else
-    echo "FASTQ conversion failed (exit \$FASTQ_DUMP_EXIT) for ${SAMPLE}; retaining SRA file" 1>&2
+  # Single file or accession
+  SAMPLE="$INPUT"
+  # If a file path, strip extension to accession
+  if [ -f "$SAMPLE" ]; then
+    SAMPLE="$(basename "$SAMPLE")"
+    SAMPLE="${SAMPLE%.sra}" 
+    SAMPLE="${SAMPLE%.sralite}"
+  fi
+  submit_one "$SAMPLE"
 fi
-
-EOF
-fi
-
-# Usage examples:
-# Single file: ./submit_fastq_dump_jobs.sh SRR123456.sra | bsub
-# Sample list: ./submit_fastq_dump_jobs.sh sample_list.txt | bsub

@@ -697,13 +697,7 @@ class SRAWorkflow:
             else:
                 # Actually corrupted - safe to remove and reprocess
                 logger.warning(self._c(f"    ! {srr_id} FASTQs exist but invalid: {reason}", self._C_YELLOW))
-                logger.warning(self._c(f"    ! Removing invalid FASTQs and will reprocess", self._C_YELLOW))
-                try:
-                    srr_r1.unlink()
-                    if srr_r2.exists():
-                        srr_r2.unlink()
-                except Exception as e:
-                    logger.warning(f"Could not remove invalid FASTQs: {e}")
+                self._cleanup_corrupted_fastqs(srr_id, reason)
 
         # Skip if SRA file already exists AND is valid (supports both .sra and .sralite)
         sra_file = self._find_sra_file(srr_id)
@@ -890,11 +884,8 @@ class SRAWorkflow:
                     job_id = self._parse_bsub_job_id(proc.stdout + (proc.stderr or ''))
                     if job_id:
                         self.submitted_jobs[srr_id] = job_id
-                        try:
-                            self._persist_submitted_job(srr_id, job_id)
-                        except Exception:
-                            pass
                         jobs_to_wait[srr_id] = job_id
+                        self._persist_submitted_jobs()
                         logger.info(self._c(f"  ✓ Submitted as Job <{job_id}>", self._C_GREEN))
                         submitted += 1
                     else:
@@ -903,15 +894,12 @@ class SRAWorkflow:
                     logger.error(self._c(f"Failed to submit conversion for {srr_id}: {e}", self._C_RED))
 
         logger.info(self._c(f"Summary: SRRs={total_srrs}, skipped_fastq={skipped_fastq}, skipped_dbgap={skipped_dbgap}, submitted={submitted}", self._C_MAGENTA))
-        # Optionally wait for jobs to finish
-        # if not self.no_wait and jobs_to_wait:
-        #     self._wait_for_jobs_and_cleanup(jobs_to_wait)
-        #     # After actual conversions, thorough cleanup using gzip test
-        #     self.cleanup_converted_sras_global()
-        # else:
-        #     logger.info(self._c("No conversions needed; skipping wait.", self._C_CYAN))
-        #     # Fast cleanup when nothing was submitted (size-only check)
-        #     self.cleanup_converted_sras_lightweight()
+
+        # Job waiting disabled: LSF jobs can run for 72 hours, blocking the script is impractical.
+        # Users can monitor jobs with: bjobs
+        # Jobs are tracked in logs/submitted_jobs.json and picked up on next run.
+        # TODO: Delete commented code below (lines 900-905, 913-916) - use git history if needed
+
         # Refresh status after conversion stage (quiet)
         try:
             self.generate_status_report(log_header=False)
@@ -956,21 +944,13 @@ class SRAWorkflow:
         status = self._bjobs_status(job_id)
         return status in ('PEND', 'RUN', 'PSUSP', 'USUSP', 'SSUSP')
 
-    def _persist_submitted_job(self, srr_id: str, job_id: str) -> None:
-        """Append or merge the submitted job ID to logs/submitted_jobs.json."""
+    def _persist_submitted_jobs(self) -> None:
+        """Write entire submitted_jobs dict to disk (single source of truth)."""
         db_path = self.logs_dir / 'submitted_jobs.json'
-        data = {}
         try:
-            if db_path.exists():
-                data = json.loads(db_path.read_text() or '{}')
-        except (json.JSONDecodeError, OSError) as e:
-            logger.debug(f"Could not load existing job database, starting fresh: {e}")
-            data = {}
-        data[str(srr_id)] = str(job_id)
-        try:
-            db_path.write_text(json.dumps(data, indent=2) + "\n")
+            db_path.write_text(json.dumps(self.submitted_jobs, indent=2) + "\n")
         except OSError as e:
-            logger.warning(f"Could not persist job ID for {srr_id}: {e}")
+            logger.warning(f"Could not persist job database: {e}")
 
     def _load_and_discover_active_jobs(self) -> None:
         """Load previous submissions and discover active LSF jobs in this directory.
@@ -1218,12 +1198,8 @@ class SRAWorkflow:
 
             # Persist updated submitted_jobs (removes finished jobs from JSON)
             if finished:
-                db_path = self.logs_dir / 'submitted_jobs.json'
-                try:
-                    db_path.write_text(json.dumps(self.submitted_jobs, indent=2) + "\n")
-                    logger.debug(f"Cleared {len(finished)} finished job(s) from submitted_jobs.json")
-                except OSError as e:
-                    logger.warning(f"Could not update submitted_jobs.json: {e}")
+                self._persist_submitted_jobs()
+                logger.debug(f"Cleared {len(finished)} finished job(s) from submitted_jobs.json")
 
             # Periodic status refresh each poll cycle
             try:
