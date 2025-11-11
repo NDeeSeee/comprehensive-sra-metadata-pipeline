@@ -907,15 +907,21 @@ class SRAWorkflow:
         - Loads logs/submitted_jobs.json and keeps only still-active jobs
         - Discovers active jobs with name 'fastq_<SRR>' whose CWD equals self.cancer_dir
         - Merges discoveries into self.submitted_jobs
+        - CRITICAL: Persists cleaned dict to remove DONE/EXIT jobs from tracking
         """
         # Load persisted
         db_path = self.logs_dir / 'submitted_jobs.json'
+        cleaned_count = 0
         if db_path.exists():
             try:
                 data = json.loads(db_path.read_text() or '{}')
+                original_count = len(data) if isinstance(data, dict) else 0
                 for srr, jid in (data.items() if isinstance(data, dict) else []):
                     if jid and self._is_job_active(str(jid)):
                         self.submitted_jobs[str(srr)] = str(jid)
+                cleaned_count = original_count - len(self.submitted_jobs)
+                if cleaned_count > 0:
+                    logger.info(self._c(f"Cleaned {cleaned_count} finished job(s) from tracking", self._C_CYAN))
             except (json.JSONDecodeError, OSError) as e:
                 logger.debug(f"Could not load submitted jobs database: {e}")
 
@@ -984,6 +990,10 @@ class SRAWorkflow:
         found = _discover_with_cwd()
         if found == 0:
             _discover_with_long()
+
+        # CRITICAL: Persist cleaned/discovered jobs to prevent re-loading stale DONE jobs
+        if cleaned_count > 0 or len(self.submitted_jobs) > 0:
+            self._persist_submitted_jobs()
 
     def _gzip_test(self, *paths: Path) -> tuple:
         """Validate gzip files with full integrity check.
