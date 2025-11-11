@@ -584,49 +584,6 @@ class SRAWorkflow:
             logger.debug(f"Error counting reads in {fastq_gz_path.name}: {e}")
             return (0, False)
 
-    # def load_modules(self):
-    #     """Load required modules (sratoolkit and aspera).
-
-    #     Best-effort attempt since 'module' command may not be available or
-    #     may be a shell function. Logs warnings if modules fail to load.
-    #     """
-    #     modules_loaded = []
-    #     modules_failed = []
-
-    #     for module_name in ['sratoolkit/2.10.4', 'aspera/3.9.1']:
-    #         try:
-    #             result = subprocess.run(
-    #                 f'module load {module_name}',
-    #                 shell=True,
-    #                 check=False,
-    #                 capture_output=True,
-    #                 text=True,
-    #                 timeout=5
-    #             )
-    #             if result.returncode == 0:
-    #                 modules_loaded.append(module_name)
-    #                 logger.debug(f"Loaded module: {module_name}")
-    #             else:
-    #                 # Check if 'module' command exists
-    #                 if 'command not found' in result.stderr or 'module: not found' in result.stderr:
-    #                     logger.debug("Module system not available; assuming tools are in PATH")
-    #                     break
-    #                 else:
-    #                     modules_failed.append(module_name)
-    #                     logger.warning(f"Failed to load module {module_name}: {result.stderr.strip()}")
-    #         except subprocess.TimeoutExpired:
-    #             logger.warning(f"Timeout loading module {module_name}")
-    #             modules_failed.append(module_name)
-    #         except Exception as e:
-    #             logger.debug(f"Could not load module {module_name}: {e}")
-    #             modules_failed.append(module_name)
-
-    #     if modules_failed:
-    #         logger.warning(
-    #             f"Some modules failed to load: {', '.join(modules_failed)}. "
-    #             "Ensure required tools (prefetch, fastq-dump) are available in PATH."
-    #         )
-
     def download_sra_files(self):
         """Step 1: Download SRA files for all samples"""
         logger.info("=" * 50)
@@ -896,21 +853,13 @@ class SRAWorkflow:
         logger.info(self._c(f"Summary: SRRs={total_srrs}, skipped_fastq={skipped_fastq}, skipped_dbgap={skipped_dbgap}, submitted={submitted}", self._C_MAGENTA))
 
         # Job waiting disabled: LSF jobs can run for 72 hours, blocking the script is impractical.
-        # Users can monitor jobs with: bjobs
-        # Jobs are tracked in logs/submitted_jobs.json and picked up on next run.
-        # TODO: Delete commented code below (lines 900-905, 913-916) - use git history if needed
+        # Users monitor jobs with: bjobs
+        # Jobs tracked in logs/submitted_jobs.json are picked up on next run.
 
-        # Refresh status after conversion stage (quiet)
         try:
             self.generate_status_report(log_header=False)
         except Exception as e:
             logger.warning(f"Failed to update status report: {e}")
-
-        # If BAMs exist, perform final cleanup of SRAs (NOT FASTQs - user needs both!)
-        # try:
-        #     self.cleanup_sras_for_completed_samples()
-        # except Exception as e:
-        #     logger.warning(self._c(f"Final cleanup skipped due to error: {e}", self._C_YELLOW))
 
     def _parse_bsub_job_id(self, text: str):
         match = re.search(r"Job\s*<(\d+)>", text or "")
@@ -1304,86 +1253,6 @@ class SRAWorkflow:
                 except Exception:
                     pass
 
-
-    # def cleanup_converted_sras_global(self):
-    #     """Delete .sra files when FASTQs exist and pass gzip integrity validation (handles both single-end and paired-end).
-
-    #     This is the THOROUGH cleanup method - validates gzip integrity before removal.
-    #     Used after actual conversion jobs complete to ensure FASTQs are fully valid.
-    #     Timeout: Uses self.gzip_test_timeout (default 60s).
-
-    #     Use this when:
-    #     - After conversion jobs finish
-    #     - When you need to ensure FASTQs are not corrupted before removing source data
-
-    #     SAFETY: Checks for active fastq-dump processes before cleanup to prevent
-    #     race conditions and .nfs ghost files.
-    #     """
-    #     # Build unique SRR list from samples
-    #     srr_ids = set()
-    #     for s in self.samples.values():
-    #         for sid in s['srr_ids']:
-    #             srr_ids.add(sid)
-    #     removed = 0
-    #     skipped_unsafe = 0
-    #     for srr_id in sorted(srr_ids):
-    #         # Find SRA file (supports both .sra and .sralite)
-    #         sra_file = self._find_sra_file(srr_id)
-    #         if not sra_file:
-    #             continue
-    #         r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
-    #         r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
-    #         # Handle both single-end and paired-end layouts
-    #         if r1.exists():
-    #             # CRITICAL: Use thorough validation before deleting source SRA
-    #             is_valid, _ = self._validate_fastq_pair(r1, r2, srr_id, thorough=True)
-    #             if is_valid:
-    #                 # Multi-layered safety check before deletion
-    #                 is_safe, reason = self._is_sra_safe_to_delete(sra_file, srr_id)
-    #                 if is_safe:
-    #                     with contextlib.suppress(Exception):
-    #                         sra_file.unlink()
-    #                         removed += 1
-    #                 else:
-    #                     logger.debug(f"Skipping {sra_file.name} deletion: {reason}")
-    #                     skipped_unsafe += 1
-    #     if removed:
-    #         logger.info(self._c(f"  ✓ Global cleanup removed {removed} converted .sra files", self._C_GREEN))
-    #     if skipped_unsafe:
-    #         logger.info(self._c(f"  ℹ Skipped {skipped_unsafe} .sra file(s) due to safety checks (in use or recently modified)", self._C_CYAN))
-
-    # def cleanup_sras_for_completed_samples(self):
-    #     """If a sample has a BAM, remove only its SRR .sra files to free space.
-
-    #     IMPORTANT: User needs BOTH BAMs AND FASTQs - only delete .sra files!
-    #     FASTQs are preserved even when BAM exists.
-
-    #     This only cleans up intermediate .sra files after successful conversion to FASTQ.
-    #     """
-    #     total_sra_removed = 0
-
-    #     for sample_id, sample_data in self.samples.items():
-    #         if not self._sample_has_bam(sample_id):
-    #             continue
-    #         for srr_id in sample_data['srr_ids']:
-    #             r1 = self.cancer_dir / f"{srr_id}_1.fastq.gz"
-    #             r2 = self.cancer_dir / f"{srr_id}_2.fastq.gz"
-
-    #             # Only delete SRA if FASTQs exist (confirms successful conversion)
-    #             if r1.exists():
-    #                 # Delete SRA file (supports both .sra and .sralite)
-    #                 # DO NOT DELETE FASTQs - user needs them!
-    #                 sra_file = self._find_sra_file(srr_id)
-    #                 with contextlib.suppress(Exception):
-    #                     if sra_file:
-    #                         sra_file.unlink()
-    #                         total_sra_removed += 1
-
-    #     if total_sra_removed:
-    #         logger.info(self._c(
-    #             f"  ✓ Final cleanup (BAM present): removed {total_sra_removed} .sra files (FASTQs preserved)",
-    #             self._C_GREEN
-    #         ))
 
     def _log_removed_zero_bams(self, removed_bam_filenames):
         """Append removed BAM sample IDs to bams/removed_zero_bams.txt with deduplication.
@@ -1863,7 +1732,7 @@ class SRAWorkflow:
             # Execute workflow steps
             # Note: No global directory change - all subprocess calls use cwd parameter for portability
             self.parse_sample_list()
-            # self.load_modules()
+
             # Pre-run cleanup: remove invalid BAMs and artifacts from prior runs
             try:
                 logger.info(self._c("Pre-run cleanup: scanning for invalid BAMs, converted .sra, and empty SRR dirs...", self._C_CYAN))
