@@ -195,6 +195,19 @@ def normalize_cancer_key(label: str) -> str:
         "anus_anal_canal_anorectum": "anus_anal_canal_anorectum",
         "anus_anal_canal_&_anorectum": "anus_anal_canal_anorectum",
         "anus_anal_canal_and_anorectum": "anus_anal_canal_anorectum",
+        # Breast HR+/HER2+
+        "hr_her2_breast_cancer": "hr_her2_breast_cancer",
+        "hr_her2+_breast_cancer": "hr_her2_breast_cancer",
+        "hr+_her2+_breast_cancer": "hr_her2_breast_cancer",
+        # Melanoma
+        "melanoma_of_the_skin": "melanoma_of_the_skin",
+        # Bones and Joints
+        "bones_and_joints": "bones_and_joints",
+        "bones_joints": "bones_and_joints",
+        # Small Intestine
+        "small_intestine": "small_intestine",
+        # Meningioma of the Brain & other nervous system
+        "meningioma_of_the_brain_other_nervous_system": "meningioma_of_the_brain_other_nervous_system",
     }
     return mapping.get(k, k)
 
@@ -204,39 +217,27 @@ def resolve_cancer_terms(cancer_label: str, yaml_path: Path) -> dict:
     key = normalize_cancer_key(cancer_label)
     entry = db.get(key)
     if not entry:
-        # Fallback minimal definition to allow immediate use
-        entry = {
-            "display_name": cancer_label,
-            "anatomy_terms": ["anal", "anal canal", "anorectal", "rectal"],
-            "malignancy_terms": [
-                "cancer", "carcinoma", "adenocarcinoma", "squamous cell carcinoma", "malignant"
-            ],
-            "search_terms": [
-                "anal squamous cell carcinoma",
-                "anorectal carcinoma",
-                "rectal adenocarcinoma",
-                "anal canal carcinoma",
-                "rectal cancer",
-            ],
-            "notes": "exclude stool/oral microbiome; focus on human epithelial malignancy",
-        }
+        raise RuntimeError(
+            f"No cancer term mapping found for '{cancer_label}' (normalized='{key}'). "
+            f"Please add an entry to {yaml_path} to avoid incorrect discovery."
+        )
     # Coerce types and ensure lists are lists; if missing or empty, backfill sensible defaults
     def as_list(v, default: List[str]) -> List[str]:
         if isinstance(v, list):
             return v
         return default
 
-    entry_anatomy = as_list(entry.get("anatomy_terms"), ["anal", "anal canal", "anorectal", "rectal"])
-    # Ensure common synonyms are present
-    for syn in ["anus", "rectum", "anorectum"]:
-        if syn not in entry_anatomy:
-            entry_anatomy.append(syn)
-    entry_malign = as_list(entry.get("malignancy_terms"), [
-        "cancer", "carcinoma", "adenocarcinoma", "squamous cell carcinoma", "malignant"
-    ])
-    entry_search = as_list(entry.get("search_terms"), [
-        "anal squamous cell carcinoma", "anorectal carcinoma", "rectal adenocarcinoma", "anal canal carcinoma", "rectal cancer"
-    ])
+    # Use YAML-provided lists only; no hardcoded defaults to avoid cross-cohort contamination
+    entry_anatomy = as_list(entry.get("anatomy_terms"), [])
+    entry_malign = as_list(entry.get("malignancy_terms"), [])
+    entry_search = as_list(entry.get("search_terms"), [])
+
+    # Validate non-empty required lists
+    if not entry_anatomy or not entry_malign or not entry_search:
+        raise RuntimeError(
+            f"Incomplete term mapping for '{cancer_label}' (normalized='{key}'): "
+            f"anatomy_terms={bool(entry_anatomy)}, malignancy_terms={bool(entry_malign)}, search_terms={bool(entry_search)}"
+        )
 
     return {
         "normalized_key": key,
@@ -284,6 +285,23 @@ def contains_any(text: str, terms: List[str]) -> bool:
     return any(term.lower() in t for term in terms)
 
 
+def contains_any_token(text: str, terms: List[str]) -> bool:
+    """Return True if any term appears as a whole token/phrase.
+    Token-aware matching avoids substring false-positives like 'oral' in 'temporal'.
+    """
+    if not text or not terms:
+        return False
+    t = text.lower()
+    for term in terms:
+        q = (term or "").strip().lower()
+        if not q:
+            continue
+        pattern = r"(?<!\w)" + re.escape(q) + r"(?!\w)"
+        if re.search(pattern, t):
+            return True
+    return False
+
+
 def candidate_text_blurb(rec: dict) -> str:
     fields = [
         rec.get("study_title", ""),
@@ -316,13 +334,13 @@ def apply_discovery_filters(candidates: List[dict], anatomy_terms: List[str], ma
         if not looks_human(sname, tid):
             dropped.append({"accession": run, "stage_dropped": "discovery", "reason": "non_human"})
             continue
-        if contains_any(text, DISCOVERY_EXCLUDE_KEYWORDS):
+        if contains_any_token(text, DISCOVERY_EXCLUDE_KEYWORDS):
             dropped.append({"accession": run, "stage_dropped": "discovery", "reason": "exclude_keyword"})
             continue
-        if not (contains_any(text, anatomy_terms) and contains_any(text, malignancy_terms)):
+        if not (contains_any_token(text, anatomy_terms) and contains_any_token(text, malignancy_terms)):
             # Allow pass-through if the matched query term itself carries both signals
             qterm = (rec.get("query_term") or "").lower()
-            if not (contains_any(qterm, anatomy_terms) and contains_any(qterm, malignancy_terms)):
+            if not (contains_any_token(qterm, anatomy_terms) and contains_any_token(qterm, malignancy_terms)):
                 dropped.append({"accession": run, "stage_dropped": "discovery", "reason": "missing_anatomy_or_malignancy_terms"})
                 continue
         kept.append(rec)
@@ -688,17 +706,20 @@ def apply_metadata_qc(row: dict, anatomy_terms: List[str], malignancy_terms: Lis
     if not looks_human(row.get("scientific_name") or row.get("ScientificName"), str(row.get("tax_id") or row.get("TaxID") or "")):
         return False, "non_human"
     text = candidate_text_blurb(row)
-    if contains_any(text, DISCOVERY_EXCLUDE_KEYWORDS):
+    if contains_any_token(text, DISCOVERY_EXCLUDE_KEYWORDS):
         return False, "exclude_keyword"
     # Anatomy + malignancy requirement
-    if not (contains_any(text, anatomy_terms) and contains_any(text, malignancy_terms)):
-        return False, "missing_anatomy_or_malignancy_terms"
+    if not (contains_any_token(text, anatomy_terms) and contains_any_token(text, malignancy_terms)):
+        qterm = (row.get("query_term") or "").lower()
+        if not (contains_any_token(qterm, anatomy_terms) and contains_any_token(qterm, malignancy_terms)):
+            return False, "missing_anatomy_or_malignancy_terms"
     # Library strategy
     if not strategy_allowed(row.get("library_strategy", ""), row.get("library_source", "")):
         return False, "library_strategy_not_allowed"
     # Parsed sample attributes can indicate metagenome
     attrs = parse_sample_attribute(row.get("sample_attribute", ""))
-    if any(contains_any(str(v), ["metagenome", "microbiome"]) for v in attrs.values()):
+    microbiome_terms = ["metagenome", "metagenomic", "microbiome", "shotgun metagenomics", "16s", "amplicon"]
+    if any(contains_any_token(str(v), microbiome_terms) for v in attrs.values()):
         return False, "attributes_indicate_microbiome"
     return True, None
 
@@ -781,6 +802,9 @@ def build_cohort(cancer_label: str, out_dir: Path, yaml_path: Path, limit: int =
             dropped_qc.append({"accession": acc, "stage_dropped": "metadata_qc", "reason": "no_metadata_sources"})
             continue
         merged = merge_metadata_row(ena_row, runinfo_row)
+        # Preserve discovery context for QC fallbacks
+        if rec.get("query_term") and not merged.get("query_term"):
+            merged["query_term"] = rec.get("query_term")
         # Fetch and merge BioSample attributes if available (prefer ENA sample endpoint; fallback NCBI)
         biosample_id = merged.get("BioSample") or merged.get("biosample_accession") or merged.get("sample_accession")
         if isinstance(biosample_id, str) and biosample_id.strip():

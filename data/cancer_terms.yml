@@ -19,3 +19,112 @@ anus_anal_canal_anorectum:
     - "anal canal carcinoma"
     - "rectal cancer"
   notes: "exclude stool/oral microbiome; focus on human epithelial malignancy"
+
+melanoma_of_the_skin:
+  display_name: "Melanoma of the skin"
+  anatomy_terms:
+    - "skin"
+    - "cutaneous"
+  malignancy_terms:
+    - "melanoma"
+    - "cancer"
+    - "malignant"
+  search_terms:
+    - "cutaneous melanoma"
+    - "melanoma of the skin"
+    - "skin melanoma"
+    - "malignant melanoma"
+  notes: "focus on human cutaneous melanoma; exclude microbiome"
+
+hr_her2_breast_cancer:
+  display_name: "HR+/HER2+ Breast Cancer"
+  anatomy_terms:
+    - "breast"
+    - "mammary"
+  malignancy_terms:
+    - "cancer"
+    - "carcinoma"
+    - "adenocarcinoma"
+    - "malignant"
+  search_terms:
+    - "hr+ breast cancer"
+    - "her2+ breast cancer"
+    - "her2 positive breast cancer"
+    - "luminal breast cancer"
+    - "mammary carcinoma"
+  notes: "human mammary epithelial malignancy; exclude microbiome"
+
+bones_and_joints:
+  display_name: "Bones and Joints"
+  anatomy_terms:
+    - "bone"
+    - "bones"
+    - "joint"
+    - "joints"
+    - "skeletal"
+  malignancy_terms:
+    - "sarcoma"
+    - "osteosarcoma"
+    - "chondrosarcoma"
+    - "ewing sarcoma"
+    - "synovial sarcoma"
+    - "chordoma"
+    - "cancer"
+    - "malignant"
+  search_terms:
+    - "osteosarcoma"
+    - "chondrosarcoma"
+    - "ewing sarcoma"
+    - "synovial sarcoma"
+    - "chordoma"
+    - "bone sarcoma"
+    - "bone cancer"
+    - "joint sarcoma"
+  notes: "human skeletal sarcomas; exclude microbiome"
+
+meningioma_of_the_brain_other_nervous_system:
+  display_name: "Meningioma of the Brain & Other Nervous System"
+  anatomy_terms:
+    - "brain"
+    - "meningeal"
+    - "meninges"
+    - "cns"
+    - "nervous system"
+  malignancy_terms:
+    - "meningioma"
+    - "cancer"
+    - "tumor"
+    - "malignant"
+  search_terms:
+    - "meningioma"
+    - "brain meningioma"
+    - "intracranial meningioma"
+    - "central nervous system meningioma"
+  notes: "human meningiomas; exclude microbiome"
+
+small_intestine:
+  display_name: "Small Intestine"
+  anatomy_terms:
+    - "small intestine"
+    - "small-intestine"
+    - "intestine"
+    - "intestinal"
+    - "duodenum"
+    - "jejunum"
+    - "ileum"
+    - "small bowel"
+  malignancy_terms:
+    - "adenocarcinoma"
+    - "neuroendocrine tumor"
+    - "net"
+    - "cancer"
+    - "carcinoma"
+    - "malignant"
+  search_terms:
+    - "small intestine adenocarcinoma"
+    - "small intestinal adenocarcinoma"
+    - "small bowel cancer"
+    - "duodenal adenocarcinoma"
+    - "jejunal adenocarcinoma"
+    - "ileal neuroendocrine tumor"
+  notes: "human small bowel malignancies; exclude microbiome"

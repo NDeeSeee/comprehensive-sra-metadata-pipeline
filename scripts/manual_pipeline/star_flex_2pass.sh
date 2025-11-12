@@ -189,38 +189,66 @@ submit_from_list() {
   wait_interval=${STAR_WAIT_INTERVAL_SEC:-60}
 
   # Helper: fetch current columns for a sample from the status file
+  # Returns: R1, R2, STATUS (for paired-end) or R1, "", STATUS (for single-end)
   _read_sample_fields() {
     local sfile="$1" sid="$2"
-    awk -v s="$2" 'BEGIN{FS=OFS="\t"} $1==s {print $2"\t"$3"\t"$4; exit}' "$1"
+    awk -v s="$sid" 'BEGIN{FS=OFS="\t"}
+      $1==s {
+        if (NF == 4 && $3 == "") {
+          # Single-end: col2=R1, col3=empty, col4=status; use placeholder for R2
+          print $2, "-", $4
+        } else if (NF == 4) {
+          # Paired-end: col2=R1, col3=R2, col4=status
+          print $2, $3, $4
+        } else if (NF == 3) {
+          # Legacy single-end format: col2=R1, col3=status
+          print $2, "-", $3
+        } else {
+          # Unknown format, output as-is
+          print $2, $3, $4
+        }
+        exit
+      }' "$sfile"
   }
 
-  # Helper: wait until FASTQ_DONE, or skip on DBGaP_REQUIRED; returns 0 when done, 1 to skip
-  _wait_for_fastq_done() {
+  # Helper: check if sample is ready for submission; returns 0 if ready, 1 to skip, 2 to wait
+  _check_sample_status() {
     local sfile="$1" sid="$2"
-    while true; do
-      local line
-      line="$(_read_sample_fields "$sfile" "$sid")"
-      # If not found or no status col, proceed immediately
-      if [[ -z "$line" ]]; then
-        echo "${sid}: no status info; proceeding"
-        return 0
-      fi
-      local r1 r2 st
-      IFS=$'\t' read -r r1 r2 st <<<"$line"
-      if [[ "$st" == "FASTQ_DONE" ]]; then
-        return 0
-      fi
-      if [[ "$st" == "DBGaP_REQUIRED" ]]; then
-        echo "${sid}: DBGaP_REQUIRED; skipping"
-        return 1
-      fi
-      echo "${sid}: waiting for FASTQ_DONE (current=${st:-unknown})..."
-      sleep "$wait_interval"
-    done
+    local line
+    line="$(_read_sample_fields "$sfile" "$sid")"
+    # If not found or no status col, proceed immediately
+    if [[ -z "$line" ]]; then
+      echo "${sid}: no status info; proceeding"
+      return 0
+    fi
+    local r1 r2 st
+    IFS=$'\t' read -r r1 r2 st <<<"$line"
+
+    # Skip if already done or if DBGaP required
+    if [[ "$st" == "BAM_DONE" ]]; then
+      echo "${sid}: BAM_DONE; skipping"
+      return 1
+    fi
+    if [[ "$st" == "DBGaP_REQUIRED" ]]; then
+      echo "${sid}: DBGaP_REQUIRED; skipping"
+      return 1
+    fi
+
+    # Ready if FASTQ_DONE
+    if [[ "$st" == "FASTQ_DONE" ]]; then
+      return 0
+    fi
+
+    # Otherwise wait
+    return 2
   }
 
-  # Submit one job per line; support tab- or whitespace-delimited lines; skip comments/empties
-  # Read up to 4 columns (SAMPLE, R1, R2, STATUS). STATUS may be used to gate submission.
+  # First pass: submit all samples that are ready (FASTQ_DONE and not BAM_DONE)
+  echo "=== First pass: submitting all ready samples ==="
+  local submitted_count=0
+  local skipped_count=0
+  local pending_count=0
+
   while IFS=$'\t' read -r SAMPLE FQ1 FQ2 _STATUS || [[ -n "${SAMPLE}" ]]; do
     if [[ -z "${FQ1:-}" ]]; then
       # Fallback: split by whitespace if tabs not used
@@ -230,18 +258,28 @@ submit_from_list() {
     [[ -z "${SAMPLE}" ]] && continue
     [[ "${SAMPLE}" =~ ^# ]] && continue
 
-    # If status file has statuses, wait for FASTQ_DONE; skip DBGaP_REQUIRED
-    if ! _wait_for_fastq_done "$sample_list" "$SAMPLE"; then
+    # Check status: 0=ready, 1=skip, 2=wait
+    local status_code=0
+    _check_sample_status "$sample_list" "$SAMPLE" || status_code=$?
+
+    if [[ $status_code -eq 1 ]]; then
+      # Skip (BAM_DONE or DBGaP_REQUIRED)
+      skipped_count=$((skipped_count + 1))
+      continue
+    elif [[ $status_code -eq 2 ]]; then
+      # Not ready yet, will check in wait loop
+      pending_count=$((pending_count + 1))
       continue
     fi
 
     # Re-read the latest R1/R2 fields right before submission (they may have changed)
-    {
-      latest_line="$(_read_sample_fields "$sample_list" "$SAMPLE")"
-      if [[ -n "$latest_line" ]]; then
-        IFS=$'\t' read -r FQ1 FQ2 _STATUS <<<"$latest_line"
-      fi
-    }
+    local latest_line
+    latest_line="$(_read_sample_fields "$sample_list" "$SAMPLE")"
+    if [[ -n "$latest_line" ]]; then
+      IFS=$'\t' read -r FQ1 FQ2 _STATUS <<<"$latest_line"
+      # Convert placeholder "-" back to empty string for single-end
+      [[ "$FQ2" == "-" ]] && FQ2=""
+    fi
 
     echo "Submit ${SAMPLE}: status=FASTQ_DONE"
 
@@ -254,7 +292,84 @@ submit_from_list() {
          -e "logs/STAR2pass_${SAMPLE}.err" \
          -cwd "${list_dir}" \
          "$0" "${SAMPLE}" "${FQ1}" ${FQ2:+"${FQ2}"}
+
+    # Mark as in progress immediately after submission to prevent re-submission
+    local tmp="${sample_list}.tmp.$$"
+    awk -v s="$SAMPLE" 'BEGIN{FS=OFS="\t"} { if ($1==s) { $4="BAM_IN_PROGRESS" } print $0 }' "$sample_list" > "$tmp" && mv "$tmp" "$sample_list" || true
+
+    submitted_count=$((submitted_count + 1))
   done < "$sample_list"
+
+  echo "First pass complete: submitted=${submitted_count}, skipped=${skipped_count}, pending=${pending_count}"
+
+  # Wait loop: continuously check for samples that become ready
+  if [[ $pending_count -eq 0 ]]; then
+    echo "No pending samples to monitor. Exiting."
+    return 0
+  fi
+
+  echo "=== Monitoring for $pending_count pending samples that become ready ==="
+  while true; do
+    local any_pending=0
+    local any_submitted=0
+
+    while IFS=$'\t' read -r SAMPLE FQ1 FQ2 _STATUS || [[ -n "${SAMPLE}" ]]; do
+      if [[ -z "${FQ1:-}" ]]; then
+        read -r SAMPLE FQ1 FQ2 _STATUS <<<"${SAMPLE}"
+        [[ -z "${FQ1:-}" ]] && continue
+      fi
+      [[ -z "${SAMPLE}" ]] && continue
+      [[ "${SAMPLE}" =~ ^# ]] && continue
+
+      local status_code=0
+      _check_sample_status "$sample_list" "$SAMPLE" >/dev/null || status_code=$?
+
+      if [[ $status_code -eq 1 ]]; then
+        # Skip (already done or excluded)
+        continue
+      elif [[ $status_code -eq 2 ]]; then
+        # Still waiting
+        any_pending=1
+        continue
+      fi
+
+      # Newly ready! Submit it
+      local latest_line
+      latest_line="$(_read_sample_fields "$sample_list" "$SAMPLE")"
+      if [[ -n "$latest_line" ]]; then
+        IFS=$'\t' read -r FQ1 FQ2 _STATUS <<<"$latest_line"
+        # Convert placeholder "-" back to empty string for single-end
+        [[ "$FQ2" == "-" ]] && FQ2=""
+      fi
+
+      echo "Submit ${SAMPLE}: status=FASTQ_DONE (newly ready)"
+      STAR_STATUS_FILE="${sample_list}" \
+      bsub -W 12:00 -n "${THREADS}" -M 128000 \
+           -R "rusage[mem=16000] span[hosts=1]" \
+           -J "align_${SAMPLE}" \
+           -o "logs/STAR2pass_${SAMPLE}.out" \
+           -e "logs/STAR2pass_${SAMPLE}.err" \
+           -cwd "${list_dir}" \
+           "$0" "${SAMPLE}" "${FQ1}" ${FQ2:+"${FQ2}"}
+
+      # Mark as in progress immediately after submission to prevent re-submission
+      local tmp="${sample_list}.tmp.$$"
+      awk -v s="$SAMPLE" 'BEGIN{FS=OFS="\t"} { if ($1==s) { $4="BAM_IN_PROGRESS" } print $0 }' "$sample_list" > "$tmp" && mv "$tmp" "$sample_list" || true
+
+      any_submitted=$((any_submitted + 1))
+    done < "$sample_list"
+
+    # If nothing pending and nothing submitted in this round, we're done
+    if [[ $any_pending -eq 0 ]]; then
+      echo "All samples processed or skipped. Exiting."
+      break
+    fi
+
+    if [[ $any_submitted -eq 0 ]]; then
+      echo "Waiting for samples to become ready... (checking every ${wait_interval}s)"
+      sleep "$wait_interval"
+    fi
+  done
 }
 
 main() {
