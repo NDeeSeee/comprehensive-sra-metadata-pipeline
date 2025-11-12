@@ -84,15 +84,63 @@ class SRAWorkflow:
         # Create logs directory if needed
         self.logs_dir.mkdir(exist_ok=True)
 
+        # Load whitelist if it exists
+        self.whitelist_path = Path("/data/salomonis-archive/FASTQs/NCI-R01/POSEIDON/White_list_samples.txt")
+        self.whitelisted_samples = self._load_whitelist()
+
+        # Extract tissue name from cancer directory path for whitelist filtering
+        # e.g., /data/.../Tumors/Gallbladder -> Gallbladder
+        self.tissue_name = self.cancer_dir.name
+
     def _c(self, text: str, color: str) -> str:
         return f"{color}{text}{self._C_RESET}" if self._use_color else text
 
+    def _load_whitelist(self) -> dict:
+        """Load whitelisted sample IDs with tissue types from White_list_samples.txt.
+
+        Returns:
+            Dict mapping sample_id -> tissue_type (empty dict = no filtering)
+        """
+        if not self.whitelist_path.exists():
+            logger.warning(f"Whitelist file not found: {self.whitelist_path}")
+            logger.warning("Proceeding WITHOUT whitelist filtering (all samples will be processed)")
+            return {}
+
+        whitelist = {}
+        try:
+            with open(self.whitelist_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # Extract sample ID (column 1) and tissue type (column 2)
+                    parts = line.split('\t')
+                    if len(parts) >= 2:
+                        sample_id = parts[0].strip()
+                        tissue = parts[1].strip()
+                        if sample_id and tissue:
+                            whitelist[sample_id] = tissue
+
+            logger.info(self._c(f"✓ Loaded whitelist with {len(whitelist)} sample IDs across all tissues", self._C_GREEN))
+            return whitelist
+        except Exception as e:
+            logger.error(f"Failed to load whitelist: {e}")
+            logger.error("Proceeding WITHOUT whitelist filtering")
+            return {}
+
     def parse_sample_list(self):
-        """Parse sample_list.txt and extract SRR/ERR IDs for each sample"""
+        """Parse sample_list.txt and extract SRR/ERR IDs for each sample.
+
+        When whitelist is enabled, the whitelist is the SOURCE OF TRUTH:
+        - Process ALL samples from whitelist for current tissue
+        - Use sample_list.txt as lookup table to get SRR/ERR IDs
+        """
         if not self.sample_list_path.exists():
             logger.error(f"sample_list.txt not found in {self.cancer_dir}")
             sys.exit(1)
 
+        # Step 1: Build lookup table from sample_list.txt
+        sample_lookup = {}  # sample_id -> (col2, col3, line_num)
         line_num = 0
         with open(self.sample_list_path, 'r') as f:
             for line in f:
@@ -104,36 +152,80 @@ class SRAWorkflow:
                 # Try tab first, then multiple spaces as fallback
                 parts = line.split('\t')
                 if len(parts) < 3:
-                    # Try splitting by multiple spaces
                     parts = [p for p in line.split(' ') if p]
 
                 if len(parts) < 3:
-                    logger.warning(f"Line {line_num} has insufficient columns (expected >=3, got {len(parts)}): {line[:50]}")
                     continue
 
                 sample_id = parts[0].strip()
                 if not sample_id:
-                    logger.warning(f"Line {line_num} has empty sample ID, skipping")
                     continue
 
-                # Extract SRR/ERR IDs from columns 2 and 3
-                srr_ids = self._extract_srr_ids(parts[1], parts[2])
+                sample_lookup[sample_id] = (parts[1], parts[2], line_num)
+
+        # Step 2: If whitelist enabled, use it as source of truth
+        if self.whitelisted_samples:
+            # Get all whitelisted samples for current tissue
+            tissue_whitelist = {sid: tissue for sid, tissue in self.whitelisted_samples.items()
+                               if tissue == self.tissue_name}
+
+            logger.info(self._c(f"Whitelist mode: processing {len(tissue_whitelist)} {self.tissue_name} samples from whitelist", self._C_CYAN))
+
+            missing_from_sample_list = []
+            for sample_id in sorted(tissue_whitelist.keys()):
+                if sample_id in sample_lookup:
+                    col2, col3, orig_line_num = sample_lookup[sample_id]
+
+                    # Extract SRR/ERR IDs
+                    srr_ids = self._extract_srr_ids(col2, col3)
+                    if not srr_ids:
+                        logger.warning(f"Whitelisted sample {sample_id} has no valid SRR/ERR IDs in sample_list.txt")
+                        continue
+
+                    self.samples[sample_id] = {
+                        'srr_ids': srr_ids,
+                        'col2': col2,
+                        'col3': col3,
+                        'status': 'PENDING'
+                    }
+                else:
+                    missing_from_sample_list.append(sample_id)
+
+            if missing_from_sample_list:
+                logger.warning(self._c(
+                    f"⚠ {len(missing_from_sample_list)} whitelisted {self.tissue_name} sample(s) not found in sample_list.txt",
+                    self._C_YELLOW
+                ))
+                logger.warning(f"  Missing: {', '.join(missing_from_sample_list[:5])}{'...' if len(missing_from_sample_list) > 5 else ''}")
+
+        else:
+            # No whitelist - process all samples from sample_list.txt
+            for sample_id, (col2, col3, orig_line_num) in sample_lookup.items():
+                srr_ids = self._extract_srr_ids(col2, col3)
                 if not srr_ids:
-                    logger.warning(f"Line {line_num}: No valid SRR/ERR IDs found for sample {sample_id}")
+                    logger.warning(f"Line {orig_line_num}: No valid SRR/ERR IDs found for sample {sample_id}")
                     continue
 
                 self.samples[sample_id] = {
                     'srr_ids': srr_ids,
-                    'col2': parts[1],
-                    'col3': parts[2],
+                    'col2': col2,
+                    'col3': col3,
                     'status': 'PENDING'
                 }
 
         if not self.samples:
-            logger.error("No valid samples found in sample_list.txt")
+            logger.error("No valid samples found")
             sys.exit(1)
 
         logger.info(f"Found {len(self.samples)} samples")
+
+        # Summary
+        if self.whitelisted_samples:
+            tissue_whitelist_count = sum(1 for tissue in self.whitelisted_samples.values() if tissue == self.tissue_name)
+            logger.info(self._c(
+                f"✓ Processing {len(self.samples)}/{tissue_whitelist_count} whitelisted {self.tissue_name} samples (others missing SRR IDs)",
+                self._C_CYAN
+            ))
 
     def _sample_has_bam(self, sample_id: str) -> bool:
         """Return True if a BAM for this sample exists.
@@ -272,15 +364,16 @@ class SRAWorkflow:
         return (is_active, is_stale)
 
     def _extract_srr_ids(self, col2, col3):
-        """Extract unique SRR/ERR IDs from the two columns"""
+        """Extract unique SRR/ERR/DRR IDs from the two columns"""
         ids = set()
         # Combine both columns and split by comma
         combined = f"{col2},{col3}"
         for item in combined.split(','):
             # Remove _1.fastq.gz or _2.fastq.gz suffixes
             cleaned = item.replace('_1.fastq.gz', '').replace('_2.fastq.gz', '')
-            # Check if it matches SRR/ERR pattern
-            if cleaned.startswith(('SRR', 'ERR')) and cleaned[3:].isdigit():
+            # Check if it matches SRR/ERR/DRR pattern
+            # SRR = NCBI, ERR = EBI, DRR = DDBJ (Japanese)
+            if cleaned.startswith(('SRR', 'ERR', 'DRR')) and cleaned[3:].isdigit():
                 ids.add(cleaned)
         return sorted(list(ids))
 
@@ -627,13 +720,22 @@ class SRAWorkflow:
             return
 
         # Clean up orphaned prefetch temporary files from interrupted downloads
+        # Include both main directory and subdirectory locations
         orphaned_files = [
+            # Main directory
             self.cancer_dir / f"{srr_id}.sra.tmp",
             self.cancer_dir / f"{srr_id}.sra.lock",
             self.cancer_dir / f"{srr_id}.sra.prf",
             self.cancer_dir / f"{srr_id}.sralite.tmp",
             self.cancer_dir / f"{srr_id}.sralite.lock",
-            self.cancer_dir / f"{srr_id}.sralite.prf"
+            self.cancer_dir / f"{srr_id}.sralite.prf",
+            # Subdirectory (prefetch creates SRR*/SRR*.sra.lock)
+            self.cancer_dir / srr_id / f"{srr_id}.sra.tmp",
+            self.cancer_dir / srr_id / f"{srr_id}.sra.lock",
+            self.cancer_dir / srr_id / f"{srr_id}.sra.prf",
+            self.cancer_dir / srr_id / f"{srr_id}.sralite.tmp",
+            self.cancer_dir / srr_id / f"{srr_id}.sralite.lock",
+            self.cancer_dir / srr_id / f"{srr_id}.sralite.prf"
         ]
         for orphan in orphaned_files:
             if orphan.exists():
@@ -718,6 +820,33 @@ class SRAWorkflow:
                     except Exception:
                         pass
             else:
+                # Download failed - clean up orphaned prefetch files (both locations)
+                orphaned_files = [
+                    # Main directory
+                    self.cancer_dir / f"{srr_id}.sra.tmp",
+                    self.cancer_dir / f"{srr_id}.sra.lock",
+                    self.cancer_dir / f"{srr_id}.sra.prf",
+                    self.cancer_dir / f"{srr_id}.sralite.tmp",
+                    self.cancer_dir / f"{srr_id}.sralite.lock",
+                    self.cancer_dir / f"{srr_id}.sralite.prf",
+                    # Subdirectory
+                    self.cancer_dir / srr_id / f"{srr_id}.sra.tmp",
+                    self.cancer_dir / srr_id / f"{srr_id}.sra.lock",
+                    self.cancer_dir / srr_id / f"{srr_id}.sra.prf",
+                    self.cancer_dir / srr_id / f"{srr_id}.sralite.tmp",
+                    self.cancer_dir / srr_id / f"{srr_id}.sralite.lock",
+                    self.cancer_dir / srr_id / f"{srr_id}.sralite.prf"
+                ]
+                for orphan in orphaned_files:
+                    if orphan.exists():
+                        try:
+                            size = orphan.stat().st_size
+                            orphan.unlink()
+                            if size > 1024*1024:  # Only log if > 1MB
+                                logger.debug(f"    ✓ Cleaned up orphaned {orphan.name} ({size/1024/1024:.1f}MB)")
+                        except Exception as e:
+                            logger.debug(f"Could not remove {orphan.name}: {e}")
+
                 # Check for dbGaP access issues
                 with open(log_err, 'r') as f:
                     error_content = f.read().lower()
@@ -803,15 +932,16 @@ class SRAWorkflow:
                 # Check if SRA exists (supports both .sra and .sralite formats)
                 sra_file = self._find_sra_file(srr_id)
                 if sra_file:
-                    # Validate SRA before submitting conversion job
-                    if not self._validate_sra_file(sra_file):
-                        logger.warning(self._c(f"  ! {sra_file.name} exists but is invalid/corrupted", self._C_YELLOW))
-                        logger.warning(self._c(f"  ! Removing invalid SRA and will re-download", self._C_YELLOW))
-                        try:
+                    # Fast validation: check file size only (SRA already validated after download)
+                    # Full vdb-validate is expensive (30+ seconds) and redundant here
+                    try:
+                        if sra_file.stat().st_size < 1024:  # < 1KB = corrupted
+                            logger.warning(self._c(f"  ! {sra_file.name} is too small (<1KB), removing", self._C_YELLOW))
                             sra_file.unlink()
-                        except Exception as e:
-                            logger.warning(f"Could not remove invalid SRA: {e}")
-                        sra_file = None  # Mark as missing so re-download logic triggers below
+                            sra_file = None  # Mark as missing so re-download logic triggers below
+                    except Exception as e:
+                        logger.warning(f"Could not stat {sra_file.name}: {e}")
+                        sra_file = None
 
                 # If SRA doesn't exist or was just removed, re-download it
                 if not sra_file:
@@ -1719,6 +1849,7 @@ class SRAWorkflow:
         logger.info("=" * 50)
         logger.info(f"Cancer directory: {self.cancer_dir}")
         logger.info(f"Sample list: {self.sample_list_path}")
+        logger.info(f"Whitelist: {self.whitelist_path}")
         logger.info("=" * 50)
 
         # Acquire exclusive lock to prevent concurrent execution in same directory

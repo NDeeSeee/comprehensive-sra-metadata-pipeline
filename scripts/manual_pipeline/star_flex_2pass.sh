@@ -249,7 +249,13 @@ submit_from_list() {
   local skipped_count=0
   local pending_count=0
 
-  while IFS=$'\t' read -r SAMPLE FQ1 FQ2 _STATUS || [[ -n "${SAMPLE}" ]]; do
+  # CRITICAL FIX: Read entire file into array BEFORE modifying it in the loop
+  local -a sample_lines
+  mapfile -t sample_lines < "$sample_list"
+
+  for line in "${sample_lines[@]}"; do
+    # Parse line into variables
+    IFS=$'\t' read -r SAMPLE FQ1 FQ2 _STATUS <<<"$line" || continue
     if [[ -z "${FQ1:-}" ]]; then
       # Fallback: split by whitespace if tabs not used
       read -r SAMPLE FQ1 FQ2 _STATUS <<<"${SAMPLE}"
@@ -298,7 +304,7 @@ submit_from_list() {
     awk -v s="$SAMPLE" 'BEGIN{FS=OFS="\t"} { if ($1==s) { $4="BAM_IN_PROGRESS" } print $0 }' "$sample_list" > "$tmp" && mv "$tmp" "$sample_list" || true
 
     submitted_count=$((submitted_count + 1))
-  done < "$sample_list"
+  done
 
   echo "First pass complete: submitted=${submitted_count}, skipped=${skipped_count}, pending=${pending_count}"
 
@@ -313,7 +319,12 @@ submit_from_list() {
     local any_pending=0
     local any_submitted=0
 
-    while IFS=$'\t' read -r SAMPLE FQ1 FQ2 _STATUS || [[ -n "${SAMPLE}" ]]; do
+    # Read file into array to avoid modification-during-read issues
+    local -a sample_lines_inner
+    mapfile -t sample_lines_inner < "$sample_list"
+
+    for line in "${sample_lines_inner[@]}"; do
+      IFS=$'\t' read -r SAMPLE FQ1 FQ2 _STATUS <<<"$line" || continue
       if [[ -z "${FQ1:-}" ]]; then
         read -r SAMPLE FQ1 FQ2 _STATUS <<<"${SAMPLE}"
         [[ -z "${FQ1:-}" ]] && continue
@@ -357,7 +368,7 @@ submit_from_list() {
       awk -v s="$SAMPLE" 'BEGIN{FS=OFS="\t"} { if ($1==s) { $4="BAM_IN_PROGRESS" } print $0 }' "$sample_list" > "$tmp" && mv "$tmp" "$sample_list" || true
 
       any_submitted=$((any_submitted + 1))
-    done < "$sample_list"
+    done
 
     # If nothing pending and nothing submitted in this round, we're done
     if [[ $any_pending -eq 0 ]]; then
