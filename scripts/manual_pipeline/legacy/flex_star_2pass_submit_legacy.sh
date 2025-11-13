@@ -1,6 +1,7 @@
 #!/bin/bash
 # ================================================================
-# STAR 2-pass alignment LSF submission script (flexible layout)
+# LEGACY: STAR 2-pass alignment LSF submission script (flexible layout)
+# - Prefer using: star_flex_2pass.sh (unified submitter/runner with status)
 # - Supports sample list with either 2 columns (SAMPLE FASTQ1)
 #   or 3 columns (SAMPLE FASTQ1 FASTQ2)
 # - Chooses single- vs paired-end automatically based on FASTQ2 presence
@@ -41,14 +42,14 @@ while IFS=$'\t' read -r SAMPLE FQ1 FQ2 || [[ -n "${SAMPLE}" ]]; do
          -J "align_${SAMPLE}" \
          -o "logs/STAR2pass_${SAMPLE}.out" \
          -e "logs/STAR2pass_${SAMPLE}.err" \
-         "${ROOT}/run_star-flex.sh" "${SAMPLE}" "${F1_PATH}" "${F2_PATH}"
+         "${ROOT}/flex_star_2pass_run_legacy.sh" "${SAMPLE}" "${F1_PATH}" "${F2_PATH}"
   else
     bsub -W 12:00 -n 2 -M 128000 \
          -R "rusage[mem=16000] span[hosts=1]" \
          -J "align_${SAMPLE}" \
          -o "logs/STAR2pass_${SAMPLE}.out" \
          -e "logs/STAR2pass_${SAMPLE}.err" \
-         "${ROOT}/run_star-flex.sh" "${SAMPLE}" "${F1_PATH}"
+         "${ROOT}/flex_star_2pass_run_legacy.sh" "${SAMPLE}" "${F1_PATH}"
   fi
 
 done < "${SAMPLE_LIST}"
