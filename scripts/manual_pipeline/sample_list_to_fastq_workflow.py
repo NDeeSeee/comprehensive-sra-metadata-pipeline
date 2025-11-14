@@ -1428,6 +1428,62 @@ class SRAWorkflow:
                     pass
 
 
+    def _check_star_job_status(self, sample_id: str) -> str:
+        """Check if a STAR alignment job is running for this sample.
+
+        Uses bjobs -a -l to get full job names (no truncation).
+        Job names follow pattern: align_SAMPLE_ID
+
+        Returns:
+            Status string: 'RUN', 'PEND', 'DONE', 'EXIT', 'NOT_FOUND', or 'BJOBS_NOT_AVAILABLE'
+        """
+        try:
+            # Get detailed job info with full job names (no truncation)
+            # Job names are like: align_SAMN34721927
+            result = subprocess.run(
+                ['bjobs', '-a', '-l'],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False
+            )
+
+            if result.returncode != 0:
+                return 'BJOBS_NOT_AVAILABLE'
+
+            output = result.stdout
+
+            # Search for this sample's job using full job name pattern
+            job_section = None
+            for line in output.split('\n'):
+                if f'Job Name <align_{sample_id}>' in line:
+                    # Found the job, grab surrounding context
+                    start_idx = output.find(line)
+                    # Get next ~5 lines after job name line
+                    job_section = output[start_idx:start_idx+500]
+                    break
+
+            if not job_section:
+                return 'NOT_FOUND'
+
+            # Extract status from "Status <RUN>" or "Status <DONE>", etc.
+            import re
+            status_match = re.search(r'Status <([^>]+)>', job_section)
+            if status_match:
+                return status_match.group(1)
+
+            return 'UNKNOWN'
+
+        except subprocess.TimeoutExpired:
+            logger.debug(f"bjobs timeout while checking job status for {sample_id}")
+            return 'BJOBS_NOT_AVAILABLE'
+        except FileNotFoundError:
+            logger.debug("bjobs command not found")
+            return 'BJOBS_NOT_AVAILABLE'
+        except Exception as e:
+            logger.debug(f"Error checking STAR job status for {sample_id}: {e}")
+            return 'UNKNOWN'
+
     def _log_removed_zero_bams(self, removed_bam_filenames):
         """Append removed BAM sample IDs to bams/removed_zero_bams.txt with deduplication.
 
@@ -1501,11 +1557,13 @@ class SRAWorkflow:
 
         CRITICAL: Only removes BAMs for samples listed in sample_list.txt.
         Does NOT touch BAM files from other experiments/samples.
+        CRITICAL: Checks for active STAR jobs before deleting to prevent race conditions.
 
         This runs early in the workflow to clean up artifacts from previous failed runs.
         """
         removed_bams = []
         removed_bam_filenames = []  # Track filenames for logging
+        skipped_active_jobs = []  # Track samples skipped due to active STAR jobs
 
         # Build set of sample IDs from sample list
         sample_ids = set(self.samples.keys())
@@ -1521,6 +1579,16 @@ class SRAWorkflow:
 
         # Only process BAMs for samples in our sample list
         for sample_id in sample_ids:
+            # CRITICAL: Check if STAR job is actively running for this sample
+            job_status = self._check_star_job_status(sample_id)
+            if job_status in ('RUN', 'PEND'):
+                logger.info(self._c(
+                    f"  → {sample_id}: STAR job is {job_status}, skipping BAM cleanup to prevent race condition",
+                    self._C_CYAN
+                ))
+                skipped_active_jobs.append(sample_id)
+                continue  # Skip this entire sample
+
             for search_dir in search_dirs:
                 # Look for BAM files matching this sample ID
                 bam_pattern = f"{sample_id}*.bam"
@@ -1567,6 +1635,12 @@ class SRAWorkflow:
             ))
             # Log removed BAM sample IDs to bams/removed_zero_bams.txt
             self._log_removed_zero_bams(removed_bam_filenames)
+
+        if skipped_active_jobs:
+            logger.info(self._c(
+                f"  ✓ Skipped {len(skipped_active_jobs)} sample(s) with active STAR jobs to prevent race conditions",
+                self._C_GREEN
+            ))
 
         return len(removed_bams)
 
