@@ -24,17 +24,21 @@ check_job_status() {
     return
   fi
 
-  # Query bjobs for any job containing this sample ID (word boundaries to avoid partial matches)
-  local job_info
-  job_info=$(bjobs -a -w 2>/dev/null | grep -w "$sample" | head -n1)
+  # Get detailed job info with full job names (no truncation)
+  # Job names are like: align_SAMN34721927
+  local job_output
+  job_output=$(bjobs -a -l 2>/dev/null | grep -A 5 "Job Name <align_$sample>")
 
-  if [[ -z "$job_info" ]]; then
+  if [[ -z "$job_output" ]]; then
     echo "NOT_FOUND"
     return
   fi
 
-  # Extract status (3rd column in bjobs -w output: JOBID USER STAT ...)
-  echo "$job_info" | awk '{print $3}'
+  # Extract status from the line containing "Status <RUN>" or "Status <DONE>", etc.
+  local status
+  status=$(echo "$job_output" | grep -oP 'Status <\K[^>]+' | head -n1)
+
+  echo "${status:-UNKNOWN}"
 }
 
 # Check if status file exists

@@ -63,6 +63,7 @@ class SRAWorkflow:
         self.gzip_test_timeout = gzip_test_timeout
 
         self.submitted_jobs = {}  # srr_id -> job_id
+        self.failed_jobs = {}  # srr_id -> {'status': 'EXIT', 'reason': 'description', 'timestamp': ISO8601}
         self.job_poll_cycles = {}  # srr_id -> number of poll cycles observed
         # Minimal color support
         # Enable color when terminal supports it or FORCE_COLOR is set (NO_COLOR disables)
@@ -1031,14 +1032,39 @@ class SRAWorkflow:
         except OSError as e:
             logger.warning(f"Could not persist job database: {e}")
 
+    def _persist_failed_jobs(self) -> None:
+        """Write failed_jobs dict to disk for persistent error tracking."""
+        db_path = self.logs_dir / 'failed_jobs.json'
+        try:
+            db_path.write_text(json.dumps(self.failed_jobs, indent=2) + "\n")
+        except OSError as e:
+            logger.warning(f"Could not persist failed jobs database: {e}")
+
+    def _load_failed_jobs(self) -> None:
+        """Load failed jobs from disk."""
+        db_path = self.logs_dir / 'failed_jobs.json'
+        if db_path.exists():
+            try:
+                data = json.loads(db_path.read_text() or '{}')
+                if isinstance(data, dict):
+                    self.failed_jobs = data
+                    if self.failed_jobs:
+                        logger.info(self._c(f"Loaded {len(self.failed_jobs)} failed job(s) from previous runs", self._C_YELLOW))
+            except (json.JSONDecodeError, OSError) as e:
+                logger.debug(f"Could not load failed jobs database: {e}")
+
     def _load_and_discover_active_jobs(self) -> None:
         """Load previous submissions and discover active LSF jobs in this directory.
 
         - Loads logs/submitted_jobs.json and keeps only still-active jobs
+        - Loads logs/failed_jobs.json for persistent error tracking
         - Discovers active jobs with name 'fastq_<SRR>' whose CWD equals self.cancer_dir
         - Merges discoveries into self.submitted_jobs
         - CRITICAL: Persists cleaned dict to remove DONE/EXIT jobs from tracking
         """
+        # Load failed jobs first
+        self._load_failed_jobs()
+
         # Load persisted
         db_path = self.logs_dir / 'submitted_jobs.json'
         cleaned_count = 0
@@ -1255,6 +1281,14 @@ class SRAWorkflow:
                                 f"  ✗ {srr_id} job {status} but FASTQs missing. {log_msg}",
                                 self._C_RED
                             ))
+                            # Track failure for persistent error state
+                            import datetime
+                            self.failed_jobs[srr_id] = {
+                                'status': status,
+                                'reason': 'Job completed but FASTQs missing',
+                                'timestamp': datetime.datetime.now().isoformat()
+                            }
+                            self._persist_failed_jobs()
                         elif status in ('ZOMBIE', 'ZOMBI', 'UNKNOWN', 'UNKWN'):
                             logger.warning(self._c(
                                 f"  ! {srr_id} job {status}; FASTQs missing; treating as finished. {log_msg}",
@@ -1757,6 +1791,11 @@ class SRAWorkflow:
         # Priority 2: BAM exists (final output, workflow complete)
         if self._sample_has_bam(sample_id):
             return 'BAM_DONE'
+
+        # Priority 2.5: Check for failed FASTQ conversions
+        failed_srrs = [sid for sid in srr_ids if sid in self.failed_jobs]
+        if failed_srrs:
+            return f'FASTQ_ERROR ({len(failed_srrs)}/{total} failed)'
 
         # Priority 3: All FASTQs complete - check if alignment is active
         if fastq_count == total:
